@@ -8,7 +8,8 @@
  */
 
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
+import { userScopedLocalStorage } from '@/lib/user-session';
 
 // 道具项
 export interface PropItem {
@@ -149,7 +150,8 @@ export const usePropsLibraryStore = create<PropsLibraryStore>()(
       },
     }),
     {
-      name: 'moyin-props-library',
+      name: 'santi-props-library',
+      storage: createJSONStorage(() => userScopedLocalStorage),
       partialize: (state) => ({
         items: state.items,
         folders: state.folders,

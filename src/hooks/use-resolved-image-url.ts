@@ -7,7 +7,7 @@
  * Handles URL formats:
  * - `https://...` / `http://...` → pass through
  * - `data:image/...` → pass through (legacy base64)
- * - `local-image://...` → pass through (Electron custom protocol handles directly)
+ * - `local-image://...` → resolved through the platform image storage bridge
  * - `null/undefined/''` → null
  *
  * Note: `local-image://` is registered as a privileged Electron protocol
@@ -15,19 +15,46 @@
  * directly in <img src> without converting to file:// URLs.
  */
 
-import { useMemo } from 'react';
+import { useEffect, useState } from 'react';
+import { resolveImagePath } from '@/lib/image-storage';
 
 /**
  * React hook to resolve an image URL for rendering.
  * All supported URL formats are returned synchronously.
  */
 export function useResolvedImageUrl(rawUrl: string | null | undefined): string | null {
-  return useMemo(() => {
-    if (!rawUrl) return null;
-    // All supported formats pass through directly:
-    // - http:// / https://  → remote URLs
-    // - data:               → inline base64
-    // - local-image://      → Electron custom protocol (handled by protocol.handle)
-    return rawUrl;
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(rawUrl || null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!rawUrl) {
+      setResolvedUrl(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (!rawUrl.startsWith('local-image://')) {
+      setResolvedUrl(rawUrl);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setResolvedUrl(null);
+    resolveImagePath(rawUrl)
+      .then((url) => {
+        if (!cancelled) setResolvedUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedUrl(rawUrl);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [rawUrl]);
+
+  return resolvedUrl;
 }

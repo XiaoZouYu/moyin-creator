@@ -52,7 +52,7 @@ const defaultState: AppSettingsState = {
     autoCleanDays: 30,
   },
   updateSettings: {
-    autoCheckEnabled: true,
+    autoCheckEnabled: false,
     ignoredVersion: "",
   },
 };
@@ -79,7 +79,7 @@ export const useAppSettingsStore = create<AppSettingsState & AppSettingsActions>
         })),
     }),
     {
-      name: "moyin-app-settings",
+      name: "santi-app-settings",
       storage: createJSONStorage(() => fileStorage),
     }
   )

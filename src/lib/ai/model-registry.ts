@@ -11,7 +11,7 @@
  *   3. _default 保守默认值
  *
  * 设计原则：
- *   - 按模型名查表，不按 URL — memefast 代理的模型和直连一样
+ *   - 按模型名查表，不按 URL — aggregator 代理的模型和直连一样
  *   - prefix 匹配按长度降序 — 避免短前缀误匹配更具体的模型
  *   - 仅覆盖 text/chat 模型 — 图像/视频/音频不走 callChatAPI
  *   - 保守默认值 — 未知模型宁可多分批也不撞限制
@@ -45,12 +45,12 @@ export interface DiscoveredModelLimits {
  *   - Gemini: https://ai.google.dev/gemini-api/docs/models + OCI docs (2.5 = 1M ctx / 65K output)
  *   - 其他: 保守值，标注"保守"
  *
- * ⚠️ memefast 上的同名模型使用相同限制。新增模型应查阅官方文档后添加，不可靠猜测。
+ * ⚠️ aggregator 上的同名模型使用相同限制。新增模型应查阅官方文档后添加，不可靠猜测。
  */
 const STATIC_REGISTRY: Record<string, ModelLimits> = {
   // ==================== DeepSeek 系列 ====================
   // DeepSeek-V3.2: 128K context limit
-  // memefast 模型名: deepseek-v3, deepseek-v3.2, deepseek-r1
+  // aggregator 模型名: deepseek-v3, deepseek-v3.2, deepseek-r1
   'deepseek-v3':            { contextWindow: 128000,   maxOutput: 8192   },
   'deepseek-v3.2':          { contextWindow: 128000,   maxOutput: 8192   },
   'deepseek-chat':          { contextWindow: 128000,   maxOutput: 8192   },

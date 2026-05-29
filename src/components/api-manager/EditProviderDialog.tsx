@@ -23,6 +23,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import type { IProvider } from "@/lib/api-key-manager";
 import { getApiKeyCount } from "@/lib/api-key-manager";
+import { isFixedBaseUrlProviderPlatform, normalizeBuiltInProvider } from "@/lib/ai/provider-platforms";
+import { VOLC_ARK_VIDEO_BASE_URL, isVolcArkVideoPlatform } from "@/lib/volc-ark-video";
 
 interface EditProviderDialogProps {
   open: boolean;
@@ -55,6 +57,7 @@ export function EditProviderDialog({
 
   const handleSave = () => {
     if (!provider) return;
+    const isOfficialVolcArk = isVolcArkVideoPlatform(provider.platform);
 
     if (!name.trim()) {
       toast.error("请输入名称");
@@ -67,19 +70,24 @@ export function EditProviderDialog({
       .map(m => m.trim())
       .filter(m => m.length > 0);
 
-    onSave({
+    const nextProvider = normalizeBuiltInProvider({
       ...provider,
       name: name.trim(),
-      baseUrl: baseUrl.trim(),
+      baseUrl: isOfficialVolcArk ? VOLC_ARK_VIDEO_BASE_URL : baseUrl.trim(),
       apiKey: apiKey.trim(),
       model: models,
+      capabilities: isOfficialVolcArk ? ["video_generation"] : provider.capabilities,
     });
+
+    onSave(nextProvider);
 
     onOpenChange(false);
     toast.success("已保存更改");
   };
 
   const keyCount = getApiKeyCount(apiKey);
+  const hasFixedBaseUrl = isVolcArkVideoPlatform(provider?.platform)
+    || isFixedBaseUrlProviderPlatform(provider?.platform);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -106,14 +114,16 @@ export function EditProviderDialog({
           </div>
 
           {/* Base URL */}
-          <div className="space-y-2">
-            <Label>Base URL</Label>
-            <Input
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="https://api.example.com/v1"
-            />
-          </div>
+          {!hasFixedBaseUrl && (
+            <div className="space-y-2">
+              <Label>Base URL</Label>
+              <Input
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://api.example.com/v1"
+              />
+            </div>
+          )}
 
           {/* API Keys */}
           <div className="space-y-2">

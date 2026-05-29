@@ -6,6 +6,8 @@
  * Handles saving and loading images via Electron IPC
  */
 
+import { getUserScopedMediaCategory } from './user-session';
+
 // Type declarations for the imageStorage API exposed by preload
 declare global {
   interface Window {
@@ -47,7 +49,7 @@ export async function saveImageToLocal(
   }
 
   try {
-    const result = await window.imageStorage!.saveImage(url, category, filename);
+    const result = await window.imageStorage!.saveImage(url, getUserScopedMediaCategory(category), filename);
     
     if (result.success && result.localPath) {
       console.log(`Image saved locally: ${result.localPath}`);
@@ -193,7 +195,7 @@ export async function saveVideoToLocal(
   }
 
   try {
-    const result = await window.imageStorage!.saveImage(url, 'videos', filename);
+    const result = await window.imageStorage!.saveImage(url, getUserScopedMediaCategory('videos'), filename);
     
     if (result.success && result.localPath) {
       console.log(`Video saved locally: ${result.localPath}`);

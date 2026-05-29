@@ -56,7 +56,7 @@ function deepReplace(obj, search, replace) {
 
 // ==================== 1. Project Store ====================
 function prepareProjectStore() {
-  console.log('\n[1] moyin-project-store.json')
+  console.log('\n[1] santi-project-store.json')
   const data = {
     state: {
       projects: [{
@@ -69,7 +69,7 @@ function prepareProjectStore() {
     },
     version: 0,
   }
-  writeJSON(path.join(OUTPUT_PROJECTS, 'moyin-project-store.json'), data)
+  writeJSON(path.join(OUTPUT_PROJECTS, 'santi-project-store.json'), data)
 }
 
 // ==================== 2. Script ====================
@@ -112,7 +112,7 @@ function prepareDirector() {
 function prepareCharacters() {
   console.log('\n[4] characters.json (per-project)')
   // Read the global character library to get 沈星晴's full data
-  const libSrc = path.join(SRC_PROJECTS, 'moyin-character-library.json')
+  const libSrc = path.join(SRC_PROJECTS, 'santi-character-library.json')
   const libData = readJSON(libSrc)
   const chars = (libData.state || libData).characters || []
   const shenxingqing = chars.find(c => c.id === KEEP_CHAR_ID)
@@ -189,8 +189,8 @@ function prepareSclass() {
 
 // ==================== 8. Character Library (global/legacy) ====================
 function prepareCharacterLibrary() {
-  console.log('\n[8] moyin-character-library.json (global)')
-  const libSrc = path.join(SRC_PROJECTS, 'moyin-character-library.json')
+  console.log('\n[8] santi-character-library.json (global)')
+  const libSrc = path.join(SRC_PROJECTS, 'santi-character-library.json')
   const libData = readJSON(libSrc)
   const chars = (libData.state || libData).characters || []
   const shenxingqing = chars.find(c => c.id === KEEP_CHAR_ID)
@@ -210,7 +210,7 @@ function prepareCharacterLibrary() {
     },
     version: 0,
   }
-  writeJSON(path.join(OUTPUT_PROJECTS, 'moyin-character-library.json'), data)
+  writeJSON(path.join(OUTPUT_PROJECTS, 'santi-character-library.json'), data)
 }
 
 // ==================== 9. Shared (empty) ====================

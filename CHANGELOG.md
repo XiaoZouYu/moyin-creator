@@ -44,7 +44,7 @@
 
 - **多模态引用管理**：GroupRefManager 统一管理图片/视频/音频引用素材
 - **首帧图网格拼接**：N×N 策略自动拼接多角色/场景参考
-- **供应商系统精简**：仅保留魔因API (memefast) + RunningHub 两个核心供应商
+- **供应商系统精简**：仅保留AI 中转 API (aggregator) + RunningHub 两个核心供应商
 - 移除全部废弃供应商代码与 UI
 
 ### 📦 其他

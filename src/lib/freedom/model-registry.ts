@@ -686,6 +686,22 @@ export const T2I_MODELS: T2IModel[] = [
   },
   // 44
   {
+    id: 'gpt-image-2',
+    providerAliases: ["gpt-image-2"],
+    name: 'GPT Image 2',
+    category: 'premium',
+    inputs: {
+      prompt: promptInput(),
+      aspect_ratio: aspectRatioInput(['1:1', '2:3', '3:2']),
+      quality: {
+        type: 'string',
+        enum: ['low', 'medium', 'high'],
+        description: 'Output quality level',
+      },
+    },
+  },
+  // 45
+  {
     id: 'gpt-image-1.5',
     providerAliases: ["gpt-image-1.5","gpt-image-1","gpt-image-1.5-all","gpt-image-1-all","gpt-image-1-mini"],
     name: 'GPT Image 1.5',
@@ -700,7 +716,7 @@ export const T2I_MODELS: T2IModel[] = [
       },
     },
   },
-  // 45
+  // 46
   {
     id: 'wan2.6-text-to-image',
     providerAliases: ["wan2.6-text-to-image"],

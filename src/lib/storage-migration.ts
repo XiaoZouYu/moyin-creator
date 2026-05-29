@@ -12,7 +12,7 @@
  * Idempotent: checks _p/.migrated flag before running
  */
 
-import { fileStorage } from './indexed-db-storage';
+import { fileStorage, fileStorageExists } from './indexed-db-storage';
 
 const MIGRATION_FLAG_KEY = '_p/_migrated';
 
@@ -26,7 +26,7 @@ export async function migrateToProjectStorage(): Promise<void> {
 
   // Check migration flag
   try {
-    const flagExists = await window.fileStorage.exists(MIGRATION_FLAG_KEY);
+    const flagExists = await fileStorageExists(MIGRATION_FLAG_KEY);
     if (flagExists) {
       console.log('[Migration] Already migrated, skipping.');
       return;
@@ -41,7 +41,7 @@ export async function migrateToProjectStorage(): Promise<void> {
 
   try {
     // 1. Read project index to get all project IDs
-    const projectStoreRaw = await fileStorage.getItem('moyin-project-store');
+    const projectStoreRaw = await fileStorage.getItem('santi-project-store');
     if (!projectStoreRaw) {
       console.log('[Migration] No project store found, nothing to migrate.');
       await writeMigrationFlag();
@@ -61,11 +61,11 @@ export async function migrateToProjectStorage(): Promise<void> {
     console.log(`[Migration] Found ${projectIds.length} projects: ${projectIds.map(id => id.substring(0, 8)).join(', ')}`);
 
     // 2. Migrate Record-based stores (script, director)
-    await migrateRecordStore('moyin-script-store', 'script', projectIds);
-    await migrateRecordStore('moyin-director-store', 'director', projectIds);
+    await migrateRecordStore('santi-script-store', 'script', projectIds);
+    await migrateRecordStore('santi-director-store', 'director', projectIds);
 
     // 3. Migrate flat-array stores (media, characters, scenes)
-    await migrateFlatStore('moyin-media-store', 'media', projectIds, {
+    await migrateFlatStore('santi-media-store', 'media', projectIds, {
       arrayKeys: ['mediaFiles', 'folders'],
       projectIdField: 'projectId',
       sharedFilter: (item: any, key: string) => {
@@ -74,13 +74,13 @@ export async function migrateToProjectStorage(): Promise<void> {
       },
     });
 
-    await migrateFlatStore('moyin-character-library', 'characters', projectIds, {
+    await migrateFlatStore('santi-character-library', 'characters', projectIds, {
       arrayKeys: ['characters', 'folders'],
       projectIdField: 'projectId',
       sharedFilter: (item: any) => !item.projectId,
     });
 
-    await migrateFlatStore('moyin-scene-store', 'scenes', projectIds, {
+    await migrateFlatStore('santi-scene-store', 'scenes', projectIds, {
       arrayKeys: ['scenes', 'folders'],
       projectIdField: 'projectId',
       sharedFilter: (item: any) => !item.projectId,
@@ -220,7 +220,7 @@ async function migrateFlatStore(
 // ==================== Timeline Store Migration ====================
 
 async function migrateTimelineStore(activeProjectId: string): Promise<void> {
-  const raw = await fileStorage.getItem('moyin-timeline-store');
+  const raw = await fileStorage.getItem('santi-timeline-store');
   if (!raw) return;
 
   try {
@@ -256,7 +256,7 @@ export async function recoverFromLegacy(): Promise<void> {
 
   // Only run if migration has already happened
   try {
-    const flagExists = await window.fileStorage.exists(MIGRATION_FLAG_KEY);
+    const flagExists = await fileStorageExists(MIGRATION_FLAG_KEY);
     if (!flagExists) return; // Migration hasn't run yet, nothing to recover
   } catch {
     return;
@@ -266,8 +266,8 @@ export async function recoverFromLegacy(): Promise<void> {
 
   try {
     // Recover Record-based stores
-    await recoverRecordStore('moyin-script-store', 'script', isScriptDataRich);
-    await recoverRecordStore('moyin-director-store', 'director', isDirectorDataRich);
+    await recoverRecordStore('santi-script-store', 'script', isScriptDataRich);
+    await recoverRecordStore('santi-director-store', 'director', isDirectorDataRich);
 
     console.log('[Recovery] Recovery check complete.');
   } catch (error) {
@@ -303,8 +303,7 @@ async function recoverRecordStore(
   storeName: string,
   isRich: (data: any) => boolean,
 ): Promise<void> {
-  // Read legacy monolithic file directly from file system (bypass indexed-db-storage adapter)
-  const legacyRaw = await window.fileStorage!.getItem(legacyKey);
+  const legacyRaw = await fileStorage.getItem(legacyKey);
   if (!legacyRaw) return;
 
   try {
@@ -322,7 +321,7 @@ async function recoverRecordStore(
 
       // Read current per-project file
       const projectKey = `_p/${pid}/${storeName}`;
-      const currentRaw = await window.fileStorage!.getItem(projectKey);
+      const currentRaw = await fileStorage.getItem(projectKey);
 
       // Check if current per-project data is empty/default
       let currentData: any = null;

@@ -52,6 +52,7 @@ export const BRAND_REGISTRY: Record<string, BrandInfo> = {
  */
 const BRAND_PATTERNS: Array<{ pattern: RegExp; brand: string }> = [
   // OpenAI 系列
+  { pattern: /^images?[-_]?2(?:\.0)?$/i,                                brand: 'openai' },
   { pattern: /^(gpt-|o[1-9]|dall-e|dalle|chatgpt|sora|codex)/i,       brand: 'openai' },
   { pattern: /^gpt[-_]?image/i,                                         brand: 'openai' },
   { pattern: /^(text-(embedding|babbage|curie|davinci|search)|davinci-|tts-|whisper)/i, brand: 'openai' },
@@ -137,7 +138,7 @@ const BRAND_PATTERNS: Array<{ pattern: RegExp; brand: string }> = [
   // Pika
   { pattern: /^pika/i,                                                       brand: 'other' },
 
-  // aigc-* (MemeFast 聚合)
+  // aigc-* (OpenAI 兼容中转 聚合)
   { pattern: /^aigc[-_]?(image|video)/i,                                     brand: 'other' },
 ];
 

@@ -38,7 +38,7 @@ const KLING_VIDEO_VARIANTS = [
   'kling-avatar-image2video',
   'kling-advanced-lip-sync',
   'kling-effects',
-  // kling-video 模型版本 (MemeFast model_version)
+  // kling-video 模型版本 (OpenAI 兼容中转 model_version)
   'kling-v1',
   'kling-v1-5',
   'kling-v1-6',
@@ -156,6 +156,8 @@ const GEMINI_IMAGE_VARIANTS = [
 ];
 
 const GPT_IMAGE_VARIANTS = [
+  'images2.0',
+  'gpt-image-2',
   'gpt-image-1.5',
   'gpt-image-1.5-all',
   'gpt-image-1',
@@ -178,7 +180,7 @@ const SEEDREAM_IMAGE_VARIANTS = [
 const KLING_IMAGE_VARIANTS = [
   'kling-image',
   'kling-omni-image',
-  // kling-image 模型版本 (MemeFast model_version)
+  // kling-image 模型版本 (OpenAI 兼容中转 model_version)
   'kling-image-v1',
   'kling-image-v1-5',
   'kling-image-v2',
@@ -217,7 +219,7 @@ const VIDEO_FAMILY_VARIANTS: Record<string, string[]> = {
   'kling-advanced-lip-sync': KLING_VIDEO_VARIANTS,
   'kling-effects': KLING_VIDEO_VARIANTS,
   'aigc-video-kling': KLING_VIDEO_VARIANTS,
-  // kling-video 模型版本 (MemeFast model_version)
+  // kling-video 模型版本 (OpenAI 兼容中转 model_version)
   'kling-v1': KLING_VIDEO_VARIANTS,
   'kling-v1-5': KLING_VIDEO_VARIANTS,
   'kling-v1-6': KLING_VIDEO_VARIANTS,
@@ -308,6 +310,8 @@ const IMAGE_FAMILY_VARIANTS: Record<string, string[]> = {
   'gemini-2.5-flash-image': GEMINI_IMAGE_VARIANTS,
   'gemini-2.5-flash-image-preview': GEMINI_IMAGE_VARIANTS,
   // GPT image
+  'images2.0': GPT_IMAGE_VARIANTS,
+  'gpt-image-2': GPT_IMAGE_VARIANTS,
   'gpt-image-1.5': GPT_IMAGE_VARIANTS,
   'gpt-image-1.5-all': GPT_IMAGE_VARIANTS,
   'gpt-image-1': GPT_IMAGE_VARIANTS,
@@ -324,7 +328,7 @@ const IMAGE_FAMILY_VARIANTS: Record<string, string[]> = {
   // Kling image
   'kling-image': KLING_IMAGE_VARIANTS,
   'kling-omni-image': KLING_IMAGE_VARIANTS,
-  // kling-image 模型版本 (MemeFast model_version)
+  // kling-image 模型版本 (OpenAI 兼容中转 model_version)
   'kling-image-v1': KLING_IMAGE_VARIANTS,
   'kling-image-v1-5': KLING_IMAGE_VARIANTS,
   'kling-image-v2': KLING_IMAGE_VARIANTS,
@@ -397,7 +401,7 @@ function isModelAllowedByPanelType(
   }
 
   // endpoint 缺失时用模型名兜底判定（避免自定义展开型号被误过滤）
-  return /kling|veo|sora|runway|vidu|hailuo|minimax\/video|wan|luma|grok-video|seedance|aigc-video/i.test(modelId);
+  return /^ep-/i.test(modelId) || /kling|veo|sora|runway|vidu|hailuo|minimax\/video|wan|luma|grok-video|seedance|aigc-video/i.test(modelId);
 }
 
 export function ModelSelector({ type, value, onChange, className }: ModelSelectorProps) {
@@ -409,7 +413,7 @@ export function ModelSelector({ type, value, onChange, className }: ModelSelecto
   const modelEndpointTypes = useAPIConfigStore((s) => s.modelEndpointTypes);
 
   // 直接从 featureBindings 读取已绑定的模型列表
-  // 格式: ["memefast:gemini-3-pro-image-preview", "memefast:flux-dev", ...]
+  // 格式: ["aggregator:gemini-3-pro-image-preview", "aggregator:flux-dev", ...]
   const models = useMemo((): SelectorModel[] => {
     const feature = type === 'image' ? 'freedom_image' : 'freedom_video';
     const bindings = getFeatureBindings(feature);

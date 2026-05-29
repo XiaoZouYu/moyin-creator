@@ -2,11 +2,13 @@
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { getFeatureConfig } from "@/lib/ai/feature-router";
+import { corsFetch } from "@/lib/cors-fetch";
 import { uploadToImageHost, isImageHostConfigured } from "@/lib/image-host";
 import { saveVideoToLocal, readImageAsBase64 } from "@/lib/image-storage";
 import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
+import { buildVolcVideoTaskUrls, isVolcArkVideoPlatform } from "@/lib/volc-ark-video";
 
 // ==================== Content Moderation ====================
 
@@ -155,14 +157,14 @@ export async function buildImageWithRoles(
 // ==================== 模型路由检测 ====================
 
 /**
- * MemeFast supported_endpoint_types → 内部视频路由格式
+ * OpenAI 兼容中转 supported_endpoint_types → 内部视频路由格式
  * 基于 /api/pricing_new 返回的元数据，而非模型名猜测
  */
 const VIDEO_FORMAT_MAP: Record<string, 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate'> = {
   // OpenAI 官方视频格式 (sora-2): /v1/videos
   'openAI官方视频格式': 'openai_official',
   'openAI视频格式': 'openai_official',
-  // 豆包/Seedance: /volc/v1/contents/generations/tasks
+  // 豆包/Seedance 中转: /volc/v1/contents/generations/tasks
   '豆包视频异步': 'volc',
   // 阿里百炼 wan: /ali/bailian/...
   '异步': 'wan',
@@ -230,9 +232,11 @@ function getUnifiedEndpointPaths(endpointTypes: string[]): { submit: string; pol
 
 /**
  * 根据模型的 supported_endpoint_types 元数据检测应使用的视频 API 格式
- * 优先使用 MemeFast /api/pricing_new 同步的元数据，fallback 到模型名推断
+ * 优先使用 OpenAI 兼容中转 /api/pricing_new 同步的元数据，fallback 到模型名推断
  */
-function detectVideoApiFormat(model: string): 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate' {
+function detectVideoApiFormat(model: string, platform?: string): 'openai_official' | 'unified' | 'volc' | 'volc_ark' | 'wan' | 'kling' | 'replicate' {
+  if (isVolcArkVideoPlatform(platform)) return 'volc_ark';
+
   // 1. 查询 store 中的 endpoint types 元数据
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
   if (endpointTypes && endpointTypes.length > 0) {
@@ -280,7 +284,7 @@ function detectVideoApiFormat(model: string): 'openai_official' | 'unified' | 'v
   const m = model.toLowerCase();
   if (m.includes('sora-2')) return 'openai_official';
   if (m.includes('kling')) return 'kling';
-  // doubao-seedance 走 volc 格式（/volc/v1/contents/generations/tasks）
+  // doubao-seedance 默认走中转 volc 格式；火山方舟官方平台会在前面按 platform 强制分流
   if (m.includes('doubao') || m.includes('seedance') || m.includes('seedream')) return 'volc';
   if (m.includes('wan')) return 'wan';
   return 'unified';
@@ -299,10 +303,18 @@ function handleVideoSubmitError(
     console.log(`[VideoGen] Rotated to next key: ${keyHint} (due to ${status})`);
   }
   let errorMessage = `视频 API 错误: ${status}`;
+  let errorCode = '';
   try {
     const errorJson = JSON.parse(errorText);
+    errorCode = errorJson.error?.code || errorJson.code || '';
     errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
   } catch { /* ignore */ }
+  const normalizedError = `${errorCode} ${errorMessage}`.toLowerCase();
+  if (errorCode === 'AccountOverdueError' || normalizedError.includes('overdue balance')) {
+    const err = new Error(`火山方舟账号欠费或余额不足（${status}${errorCode ? ` ${errorCode}` : ''}），请到火山方舟控制台充值或结清欠款后重试。`) as Error & { status?: number };
+    err.status = status;
+    throw err;
+  }
   if (status === 401 || status === 403) throw new Error('API Key 无效或已过期');
   if (status === 429) {
     const err = new Error('API 请求过于频繁，请稍后重试') as Error & { status?: number };
@@ -415,7 +427,7 @@ function sleepOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-// Call video generation API — 根据模型自动路由到正确的 MemeFast API 格式
+// Call video generation API — 根据模型自动路由到正确的 OpenAI 兼容中转 API 格式
 export async function callVideoGenerationApi(
   apiKey: string,
   prompt: string,
@@ -460,7 +472,7 @@ export async function callVideoGenerationApi(
   );
 
   // 根据元数据/模型名检测 API 格式并路由，包裹重试（覆盖 429/503/529 等）
-  const format = detectVideoApiFormat(model);
+  const format = detectVideoApiFormat(model, resolvedPlatform);
   console.log('[VideoGen] Detected API format:', { model, format, platform: resolvedPlatform });
 
   return retryOperation(() => {
@@ -473,7 +485,9 @@ export async function callVideoGenerationApi(
       case 'openai_official':
         return callOpenAIOfficialVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, duration, videoResolution, onProgress, keyManager, signal);
       case 'volc':
-        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal);
+        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal, false, enableAudio);
+      case 'volc_ark':
+        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal, true, enableAudio);
       case 'wan':
         return callWanVideoApi(currentApiKey, prompt, videoBaseUrl, model, processedImages, videoResolution, duration, enableAudio, onProgress, keyManager, signal);
       case 'kling':
@@ -496,7 +510,7 @@ export async function callVideoGenerationApi(
 }
 
 // ==================== 视频统一格式 (grok/veo/luma/runway/海螺/即梦/doubao-seedance/wan2.6/vidu 等) ====================
-// MemeFast 文档: POST /v1/video/generations (primary) + /v1/video/create (fallback)
+// OpenAI 兼容中转 文档: POST /v1/video/generations (primary) + /v1/video/create (fallback)
 //             GET  /v1/video/generations/{id} (primary) + /v1/video/query?id= (fallback)
 
 /**
@@ -603,7 +617,7 @@ async function callUnifiedVideoApi(
   console.log(`[VideoGen] Unified format → POST ${endpointPaths.submit}`, { model, metadata, hasImage: !!firstFrame?.url });
 
   // 提交：直接使用端点类型对应的 URL
-  const resp = await fetch(submitUrl, {
+  const resp = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -652,7 +666,7 @@ async function callUnifiedVideoApi(
     onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
     await sleepOrAbort(pollInterval, signal);
 
-    const statusResponse = await fetch(pollUrl, {
+    const statusResponse = await corsFetch(pollUrl, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -683,8 +697,8 @@ async function callUnifiedVideoApi(
 }
 
 // ==================== Volcengine 豆包/Seedance 格式 ====================
-// MemeFast 文档: POST /volc/v1/contents/generations/tasks + GET /volc/v1/contents/generations/tasks/{taskId}
-// 火山方舟文档: https://www.volcengine.com/docs/82379/1520757
+// OpenAI 兼容中转: POST /volc/v1/contents/generations/tasks
+// 火山方舟官方: POST /api/v3/contents/generations/tasks
 
 async function callVolcVideoApi(
   apiKey: string,
@@ -703,6 +717,8 @@ async function callVolcVideoApi(
   /** Seedance 2.0: 音频引用 URL 列表 */
   audioRefs?: string[],
   signal?: AbortSignal,
+  officialArk: boolean = false,
+  generateAudio: boolean = false,
 ): Promise<string> {
   // 构建 content 数组（Volcengine 格式: text + image_url）
   const content: Array<Record<string, unknown>> = [];
@@ -710,10 +726,12 @@ async function callVolcVideoApi(
   // 文本内容：prompt + 内联参数（--rs, --rt, --dur, --cf）
   let textContent = prompt;
   const resolution = (videoResolution || '720p').toLowerCase();
-  textContent += ` --rs ${resolution}`;
-  textContent += ` --rt ${aspectRatio}`;
-  if (duration) textContent += ` --dur ${duration}`;
-  if (cameraFixed !== undefined) textContent += ` --cf ${cameraFixed}`;
+  if (!officialArk) {
+    textContent += ` --rs ${resolution}`;
+    textContent += ` --rt ${aspectRatio}`;
+    if (duration) textContent += ` --dur ${duration}`;
+    if (cameraFixed !== undefined) textContent += ` --cf ${cameraFixed}`;
+  }
 
   content.push({ type: 'text', text: textContent });
 
@@ -752,17 +770,27 @@ async function callVolcVideoApi(
     }
   }
 
-  const requestBody = { model, content };
+  const requestBody = officialArk
+    ? {
+        model,
+        content,
+        ...(duration ? { duration } : {}),
+        generate_audio: generateAudio,
+        ...(aspectRatio ? { ratio: aspectRatio } : {}),
+      }
+    : { model, content };
+  const taskUrls = buildVolcVideoTaskUrls(baseUrl, officialArk);
 
-  console.log('[VideoGen] Volc format → POST /volc/v1/contents/generations/tasks', {
+  console.log(`[VideoGen] Volc format → POST ${taskUrls.routeLabel}`, {
     model,
+    officialArk,
     resolution,
     aspectRatio,
     duration,
     imageCount: imageWithRoles.filter(i => i.url).length,
   });
 
-  const submitResponse = await fetch(`${baseUrl}/volc/v1/contents/generations/tasks`, {
+  const submitResponse = await corsFetch(taskUrls.submit, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -782,7 +810,7 @@ async function callVolcVideoApi(
   console.log('[VideoGen] Volc submit response:', JSON.stringify(submitData).substring(0, 500));
 
   // 检测代理包装的业务级错误（HTTP 200 但 body.status 为 failed/error）
-  // 典型场景：MemeFast 中转将上游 451（内容审核）等错误包装为 {status: "failed", message: "..."}
+  // 典型场景：OpenAI 兼容中转 中转将上游 451（内容审核）等错误包装为 {status: "failed", message: "..."}
   if (submitData.status === 'failed' || submitData.status === 'error') {
     const proxyMsg = submitData.message || submitData.error?.message || '视频提交失败（代理返回业务错误）';
     console.error('[VideoGen] Volc: proxy-wrapped business error:', proxyMsg);
@@ -793,7 +821,7 @@ async function callVolcVideoApi(
   }
 
   // 提取任务 ID（兼容多种响应格式）
-  // MemeFast 中转: { id: "cgt-..." }  /  原生火山方舟: { id: "01973..." }
+  // OpenAI 兼容中转 中转: { id: "cgt-..." }  /  原生火山方舟: { id: "01973..." }
   // 也兼容 response.* / result.* 嵌套格式
   const taskId = (
     submitData.id ||
@@ -816,15 +844,15 @@ async function callVolcVideoApi(
     throw new Error(detail || `doubao-seedance 返回空的任务 ID（响应格式未识别，请检查控制台日志）`);
   }
 
-  // 轮询: GET /volc/v1/contents/generations/tasks/{taskId}
+  // 轮询: GET /contents/generations/tasks/{taskId} 或兼容中转 /volc/v1/contents/generations/tasks/{taskId}
   const pollInterval = 5000;
   const maxAttempts = 180; // 15分钟
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
 
-    const statusResponse = await fetch(
-      `${baseUrl}/volc/v1/contents/generations/tasks/${taskId}`,
+    const statusResponse = await corsFetch(
+      taskUrls.poll(taskId),
       {
         method: 'GET',
         headers: {
@@ -852,7 +880,9 @@ async function callVolcVideoApi(
     if (status === 'succeeded') {
       // 兼容多种响应格式提取视频 URL
       const videoUrl =
-        normalizeUrl(statusData.content?.video_url) ||      // MemeFast 中转格式
+        normalizeUrl(statusData.content?.video_url) ||      // OpenAI 兼容中转 中转格式
+        normalizeUrl(Array.isArray(statusData.content) ? statusData.content[0]?.video_url : undefined) ||
+        normalizeUrl(Array.isArray(statusData.outputs) ? statusData.outputs[0]?.url : undefined) ||
         normalizeUrl(statusData.output?.video_url) ||       // 原生火山方舟格式
         normalizeUrl(statusData.output?.url) ||
         normalizeUrl(statusData.video_url) ||
@@ -877,7 +907,7 @@ async function callVolcVideoApi(
 }
 
 // ==================== 通义万象 wan 格式 ====================
-// MemeFast 文档:
+// OpenAI 兼容中转 文档:
 //   创建: POST /alibailian/api/v1/services/aigc/video-generation/video-synthesis
 //   查询: GET  /alibailian/api/v1/tasks/{task_id}
 
@@ -912,7 +942,7 @@ async function callWanVideoApi(
 
   console.log('[VideoGen] Wan format → POST /alibailian/api/v1/services/aigc/video-generation/video-synthesis', { model });
 
-  const submitResponse = await fetch(
+  const submitResponse = await corsFetch(
     `${baseUrl}/alibailian/api/v1/services/aigc/video-generation/video-synthesis`,
     {
       method: 'POST',
@@ -944,7 +974,7 @@ async function callWanVideoApi(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
 
-    const statusResponse = await fetch(
+    const statusResponse = await corsFetch(
       `${baseUrl}/alibailian/api/v1/tasks/${taskId}`,
       {
         method: 'GET',
@@ -982,11 +1012,11 @@ async function callWanVideoApi(
 }
 
 // ==================== Kling 可灵全系列格式 ====================
-// MemeFast: POST /kling/v1/videos/{path} + GET /kling/v1/videos/{path}/{task_id}
+// OpenAI 兼容中转: POST /kling/v1/videos/{path} + GET /kling/v1/videos/{path}/{task_id}
 
 /**
  * Resolve kling model name for API requests.
- * Composite IDs like 'kling-image-v1-5' → 'kling-v1-5' (MemeFast version ID).
+ * Composite IDs like 'kling-image-v1-5' → 'kling-v1-5' (OpenAI 兼容中转 version ID).
  * Video version IDs (kling-v2-6) pass through unchanged.
  */
 function resolveKlingModelName(model: string): string {
@@ -1046,7 +1076,7 @@ async function callKlingVideoApi(
   const submitUrl = `${baseUrl}/kling/v1/videos/${endpointPath}`;
   console.log('[VideoGen] Kling format →', endpointPath, { model, submitUrl });
 
-  const submitResponse = await fetch(submitUrl, {
+  const submitResponse = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1078,7 +1108,7 @@ async function callKlingVideoApi(
     onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
     await sleepOrAbort(pollInterval, signal);
 
-    const statusResponse = await fetch(pollUrl, {
+    const statusResponse = await corsFetch(pollUrl, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -1116,7 +1146,7 @@ async function callKlingVideoApi(
 }
 
 // ==================== OpenAI 官方视频格式 (sora-2) ====================
-// MemeFast: POST /v1/videos (FormData) + GET /v1/videos/{taskId}
+// OpenAI 兼容中转: POST /v1/videos (FormData) + GET /v1/videos/{taskId}
 
 /**
  * Convert aspect ratio + resolution to Sora pixel size (e.g. '1280x720')
@@ -1149,7 +1179,7 @@ async function callOpenAIOfficialVideoApi(
   const submitUrl = `${baseUrl}/v1/videos`;
   console.log('[VideoGen] OpenAI Official format → POST /v1/videos', { model, size: toSoraSize(aspectRatio, videoResolution) });
 
-  const submitResponse = await fetch(submitUrl, {
+  const submitResponse = await corsFetch(submitUrl, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}` },
     body: form,
@@ -1178,7 +1208,7 @@ async function callOpenAIOfficialVideoApi(
     onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
     await sleepOrAbort(pollInterval, signal);
 
-    const statusResponse = await fetch(pollUrl, {
+    const statusResponse = await corsFetch(pollUrl, {
       method: 'GET',
       headers: { 'Authorization': `Bearer ${apiKey}` },
       signal,
@@ -1205,7 +1235,7 @@ async function callOpenAIOfficialVideoApi(
 }
 
 // ==================== Replicate 视频格式 ====================
-// MemeFast: POST /replicate/v1/predictions + GET /replicate/v1/predictions/{id}
+// OpenAI 兼容中转: POST /replicate/v1/predictions + GET /replicate/v1/predictions/{id}
 
 async function callReplicateVideoApi(
   apiKey: string,
@@ -1237,7 +1267,7 @@ async function callReplicateVideoApi(
   const submitUrl = `${rootBase}/replicate/v1/predictions`;
   console.log('[VideoGen] Replicate format → POST /replicate/v1/predictions', { model });
 
-  const submitResponse = await fetch(submitUrl, {
+  const submitResponse = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1270,7 +1300,7 @@ async function callReplicateVideoApi(
     onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
     await sleepOrAbort(pollInterval, signal);
 
-    const statusResponse = await fetch(pollUrl, {
+    const statusResponse = await corsFetch(pollUrl, {
       method: 'GET',
       headers: { 'Authorization': `Bearer ${apiKey}` },
       signal,
@@ -1550,7 +1580,7 @@ export async function callJuxinVideoGenerationApi(
   const submitData = await retryOperation(async () => {
     // 每次重试动态取当前 key，利用 keyManager rotate 后的新 key
     const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
-    const submitResponse = await fetch(`${apiBaseUrl}/v1/video/create`, {
+    const submitResponse = await corsFetch(`${apiBaseUrl}/v1/video/create`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1616,7 +1646,7 @@ export async function callJuxinVideoGenerationApi(
     const queryUrl = new URL(`${apiBaseUrl}/v1/video/query`);
     queryUrl.searchParams.set('id', taskId);
 
-    const statusResponse = await fetch(queryUrl.toString(), {
+    const statusResponse = await corsFetch(queryUrl.toString(), {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',

@@ -8,7 +8,7 @@
  * 策略：先用关键词快速匹配，匹配不到才调用 AI
  */
 
-import { getFeatureConfig } from '@/lib/ai/feature-router';
+import { callFeatureAPI, getFeatureConfig } from '@/lib/ai/feature-router';
 import type { Scene } from '@/stores/scene-store';
 
 // ==================== 类型定义 ====================
@@ -123,17 +123,6 @@ async function matchByAI(
     console.warn('[ViewpointMatcher] No chat API configured for AI matching');
     return null;
   }
-  const model = config.models?.[0];
-  if (!model) {
-    console.warn('[ViewpointMatcher] No chat model configured for AI matching');
-    return null;
-  }
-  const apiKey = config.apiKey;
-  if (!apiKey) {
-    console.warn('[ViewpointMatcher] No chat API key configured for AI matching');
-    return null;
-  }
-
   try {
     const viewpointList = availableViewpoints
       .map(v => `- ${v.id}: ${v.name}`)
@@ -150,25 +139,11 @@ ${viewpointList}
 请只返回最匹配的视角ID（如 dining、sofa、window 等），不要任何解释。
 如果没有合适的视角，返回 null。`;
 
-    const response = await fetch('/api/ai/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: prompt }],
-        provider: config.platform,
-        apiKey,
-        model,
-        temperature: 0.1, // 低温度，更确定性的输出
-        maxTokens: 50,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`AI API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const result = data.content?.trim().toLowerCase();
+    const result = (await callFeatureAPI('chat', '你只返回一个视角 ID 或 null，不要解释。', prompt, {
+      temperature: 0.1,
+      maxTokens: 50,
+      configOverride: config,
+    })).trim().toLowerCase();
     
     // 验证返回的是有效的视角ID
     const viewpointId = availableViewpoints.find(v => v.id === result)?.id || null;

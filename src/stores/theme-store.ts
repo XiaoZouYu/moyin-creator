@@ -2,7 +2,8 @@
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { userScopedLocalStorage } from "@/lib/user-session";
 
 type Theme = "light" | "dark";
 
@@ -20,7 +21,8 @@ export const useThemeStore = create<ThemeState>()(
       toggleTheme: () => set({ theme: get().theme === "dark" ? "light" : "dark" }),
     }),
     {
-      name: "moyin-theme",
+      name: "santi-theme",
+      storage: createJSONStorage(() => userScopedLocalStorage),
     }
   )
 );

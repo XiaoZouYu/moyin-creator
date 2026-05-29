@@ -3,18 +3,27 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import App from './App.tsx'
+import './lib/user-session'
 import './index.css'
+import { installWebPlatformAdapters } from './lib/web-platform'
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-)
+installWebPlatformAdapters()
 
-// Use contextBridge (only available in Electron)
-if (window.ipcRenderer) {
-  window.ipcRenderer.on('main-process-message', (_event, message) => {
-    console.log(message)
-  })
+async function bootstrap() {
+  const { default: App } = await import('./App.tsx')
+
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  )
+
+  // Use contextBridge (only available in Electron)
+  if (window.ipcRenderer) {
+    window.ipcRenderer.on('main-process-message', (_event, message) => {
+      console.log(message)
+    })
+  }
 }
+
+void bootstrap()

@@ -17,23 +17,23 @@
 
 ### 2. 导演面板合并生成——风格与分辨率问题（Bug #1 & #2）
 - **文件**: `src/components/panels/director/split-scenes.tsx`、`src/lib/ai/image-generator.ts`
-- **结论**: 经与闭源版本（`G:\moyin-creator`）逐行对比，代码逻辑完全一致，非代码 Bug。根因为演示项目（"灌篮少女"）的场景提示词中包含动漫风格描述词，与风格设定产生冲突。
+- **结论**: 经与闭源版本（`G:\santi-creator`）逐行对比，代码逻辑完全一致，非代码 Bug。根因为演示项目（"灌篮少女"）的场景提示词中包含动漫风格描述词，与风格设定产生冲突。
 - **处理**: 已将所有尝试修改回退至与闭源版本完全一致。
 
 ---
 
 ## 二、新功能 & 体验优化
 
-### 3. 魔因API供应商——令牌分组配置醒目提示
+### 3. AI 中转 API供应商——令牌分组配置醒目提示
 - **文件**: `src/components/api-manager/AddProviderDialog.tsx`
-- **改动**: 选择魔因API平台时，在 API Key 输入区域下方显示红色背景（`bg-red-600`）、白色文字的醒目提示框，提醒用户创建令牌时必须添加以下 4 个分组：
+- **改动**: 选择AI 中转 API平台时，在 API Key 输入区域下方显示红色背景（`bg-red-600`）、白色文字的醒目提示框，提醒用户创建令牌时必须添加以下 4 个分组：
   - **图片**: 限时特价、优质gemini
   - **视频**: 官转、auto
 - **样式**: `rounded-md bg-red-600 p-3 text-xs text-white`，标题使用 `font-bold text-sm`
 
-### 4. 魔因API默认功能绑定自动配置
+### 4. AI 中转 API默认功能绑定自动配置
 - **文件**: `src/components/panels/SettingsPanel.tsx`
-- **改动**: 当编辑/保存魔因API供应商时，自动为以下功能绑定默认模型：
+- **改动**: 当编辑/保存AI 中转 API供应商时，自动为以下功能绑定默认模型：
   - `script_analysis` → `deepseek-v3.2`
   - `character_generation` → `gemini-3-pro-image-preview`
   - `video_generation` → `doubao-seedance-1-5-pro-251215`
@@ -42,7 +42,7 @@
 
 ### 5. 功能绑定推荐文案更新
 - **文件**: `src/components/api-manager/FeatureBindingPanel.tsx`
-- **改动**: 更新了魔因API的功能绑定推荐说明文案
+- **改动**: 更新了AI 中转 API的功能绑定推荐说明文案
 
 ---
 
@@ -115,7 +115,7 @@
 | # | 文件路径 | 改动类型 |
 |---|---------|---------|
 | 1 | `package.json` | 版本号 → 0.1.8 |
-| 2 | `src/components/api-manager/AddProviderDialog.tsx` | 新增魔因API提示 |
+| 2 | `src/components/api-manager/AddProviderDialog.tsx` | 新增AI 中转 API提示 |
 | 3 | `src/components/api-manager/FeatureBindingPanel.tsx` | 推荐文案更新 |
 | 4 | `src/components/image-host-manager/AddImageHostDialog.tsx` | 默认值优化 |
 | 5 | `src/components/panels/SettingsPanel.tsx` | 自动绑定 + 版本号 |

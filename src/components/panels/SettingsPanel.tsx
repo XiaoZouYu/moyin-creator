@@ -15,14 +15,21 @@ import {
   useAPIConfigStore,
   type IProvider,
   type ImageHostProvider,
-  type AIFeature,
 } from "@/stores/api-config-store";
 import { useAppSettingsStore } from "@/stores/app-settings-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useCharacterLibraryStore } from "@/stores/character-library-store";
 import { useSceneStore } from "@/stores/scene-store";
 import { useMediaStore } from "@/stores/media-store";
+import { corsFetch } from "@/lib/cors-fetch";
 import { getApiKeyCount, parseApiKeys, maskApiKey } from "@/lib/api-key-manager";
+import {
+  AUTO_VIP_PLATFORM,
+  CHUNFENG_PLATFORM,
+  isAutoVipPlatform,
+  isChunfengPlatform,
+} from "@/lib/ai/provider-platforms";
+import { clearCurrentUserLocalStorageData } from "@/lib/user-session";
 import { AddProviderDialog, EditProviderDialog, FeatureBindingPanel } from "@/components/api-manager";
 import { AddImageHostDialog } from "@/components/image-host-manager/AddImageHostDialog";
 import { EditImageHostDialog } from "@/components/image-host-manager/EditImageHostDialog";
@@ -75,18 +82,20 @@ import {
   Download,
   RefreshCw,
   Upload,
-  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { uploadToImageHost } from "@/lib/image-host";
 import { UpdateDialog } from "@/components/UpdateDialog";
 import type { AvailableUpdateInfo } from "@/types/update";
+import { VOLC_ARK_VIDEO_PLATFORM } from "@/lib/volc-ark-video";
 import packageJson from "../../../package.json";
 
 // Platform icon mapping
 const PLATFORM_ICONS: Record<string, React.ReactNode> = {
-  memefast: <Zap className="h-5 w-5" />,
+  aggregator: <Zap className="h-5 w-5" />,
+  [AUTO_VIP_PLATFORM]: <Zap className="h-5 w-5" />,
+  [CHUNFENG_PLATFORM]: <MessageSquare className="h-5 w-5" />,
   runninghub: <Image className="h-5 w-5" />,
   custom: <Settings className="h-5 w-5" />,
 };
@@ -100,6 +109,8 @@ export function SettingsPanel() {
     addProvider,
     updateProvider,
     removeProvider,
+    setFeatureBindings,
+    getFeatureBindings,
     addImageHostProvider,
     updateImageHostProvider,
     removeImageHostProvider,
@@ -108,8 +119,6 @@ export function SettingsPanel() {
     resetAdvancedOptions,
     isImageHostConfigured,
     syncProviderModels,
-    setFeatureBindings,
-    getFeatureBindings,
   } = useAPIConfigStore();
   const {
     resourceSharing,
@@ -148,66 +157,6 @@ export function SettingsPanel() {
     () => imageHostProviders.filter(isVisibleImageHostProvider),
     [imageHostProviders],
   );
-
-  // ====== Memefast 默认绑定自动补全 ======
-  // 覆盖场景：
-  //  1. 旧版本升级后已有 key 但 featureBindings 为空
-  //  2. 旧版本留下无效绑定（模型名错、provider ID 变更等）
-  //  3. 用户编辑填 key 后页面刷新
-  useEffect(() => {
-    const mf = providers.find(p => p.platform === 'memefast');
-    if (!mf || parseApiKeys(mf.apiKey).length === 0) return;
-
-    const pid = mf.id;
-    const models = mf.model || [];
-    const defaults: Record<string, string> = {
-      script_analysis: `${pid}:deepseek-v3.2`,
-      character_generation: `${pid}:gemini-3-pro-image-preview`,
-      video_generation: `${pid}:doubao-seedance-1-5-pro-251215`,
-      image_understanding: `${pid}:gemini-2.5-flash`,
-    };
-
-    // 检查绑定是否有效
-    const isBindingValid = (b: string): boolean => {
-      const idx = b.indexOf(':');
-      if (idx <= 0) return false;
-      const ref = b.slice(0, idx);
-      const model = b.slice(idx + 1);
-      const p = providers.find(pv => pv.id === ref || pv.platform === ref);
-      if (!p || parseApiKeys(p.apiKey).length === 0) return false;
-      // 模型列表为空时（尚未同步）暂时信任绑定
-      if (p.model.length === 0) return true;
-      return p.model.includes(model);
-    };
-
-    let changed = false;
-    for (const [feature, binding] of Object.entries(defaults)) {
-      const cur = getFeatureBindings(feature as AIFeature);
-
-      // 自愈：deepseek-v3 → deepseek-v3.2（在校验之前先迁移）
-      if (feature === 'script_analysis' && cur && cur.some(b => b.endsWith(':deepseek-v3'))) {
-        const migrated = cur.map(b => {
-          if (!b.endsWith(':deepseek-v3')) return b;
-          const i = b.indexOf(':');
-          return i > 0 ? `${b.slice(0, i)}:deepseek-v3.2` : binding;
-        });
-        setFeatureBindings(feature as AIFeature, [...new Set(migrated)]);
-        changed = true;
-        continue;
-      }
-
-      // 为空 或 全部无效 → 重新设置默认值
-      const needsDefault = !cur || cur.length === 0 || !cur.some(isBindingValid);
-      if (needsDefault) {
-        setFeatureBindings(feature as AIFeature, [binding]);
-        changed = true;
-      }
-    }
-    if (changed) {
-      console.log('[SettingsPanel] Auto-applied memefast default bindings');
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providers]);
 
   useEffect(() => {
     let cancelled = false;
@@ -295,13 +244,32 @@ export function SettingsPanel() {
         return /\/v\d+$/.test(normalized) ? `${normalized}/${path}` : `${normalized}/v1/${path}`;
       };
 
-      if (provider.platform === "runninghub") {
+      if (provider.platform === VOLC_ARK_VIDEO_PLATFORM) {
+        setTestResults((prev) => ({ ...prev, [provider.id]: true }));
+        toast.success("火山方舟视频生成已配置");
+        setTestingProvider(null);
+        return;
+      }
+
+      if (isAutoVipPlatform(provider.platform) || isChunfengPlatform(provider.platform)) {
         if (!normalizedBaseUrl) {
           toast.error("请先配置 Base URL");
           setTestingProvider(null);
           return;
         }
-        response = await fetch(`${normalizedBaseUrl}/query`, {
+        response = await corsFetch(buildEndpoint(normalizedBaseUrl, "models"), {
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+          },
+        });
+      } else if (provider.platform === "runninghub") {
+        if (!normalizedBaseUrl) {
+          toast.error("请先配置 Base URL");
+          setTestingProvider(null);
+          return;
+        }
+        response = await corsFetch(`${normalizedBaseUrl}/query`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -322,7 +290,7 @@ export function SettingsPanel() {
       } else if (normalizedBaseUrl && provider.model?.length) {
         const endpoint = buildEndpoint(normalizedBaseUrl, "chat/completions");
         const model = provider.model[0];
-        response = await fetch(endpoint, {
+        response = await corsFetch(endpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -457,15 +425,12 @@ export function SettingsPanel() {
     if (result.success) {
       setStoragePaths({ basePath: result.path || dir });
       
-      // 清除 localStorage 中的缓存，确保从新路径加载数据
-      const keysToRemove = Object.keys(localStorage).filter(key => 
-        key.startsWith('moyin-') || key.includes('store')
-      );
-      keysToRemove.forEach(key => localStorage.removeItem(key));
+      // 清除当前用户 localStorage 缓存，确保从新路径加载数据
+      clearCurrentUserLocalStorageData();
       
       // 清除 IndexedDB 缓存
       try {
-        const dbRequest = indexedDB.open('moyin-creator-db', 1);
+        const dbRequest = indexedDB.open('santi-creator-db', 1);
         dbRequest.onsuccess = () => {
           const db = dbRequest.result;
           if (db.objectStoreNames.contains('zustand-storage')) {
@@ -503,15 +468,12 @@ export function SettingsPanel() {
     if (!confirm("导入将覆盖当前数据，是否继续？")) return;
     const result = await window.storageManager.importData(dir);
     if (result.success) {
-      // 清除 localStorage 中的缓存，防止旧数据覆盖导入的数据
-      const keysToRemove = Object.keys(localStorage).filter(key => 
-        key.startsWith('moyin-') || key.includes('store')
-      );
-      keysToRemove.forEach(key => localStorage.removeItem(key));
+      // 清除当前用户 localStorage 缓存，防止旧数据覆盖导入的数据
+      clearCurrentUserLocalStorageData();
       
       // 清除 IndexedDB 缓存
       try {
-        const dbRequest = indexedDB.open('moyin-creator-db', 1);
+        const dbRequest = indexedDB.open('santi-creator-db', 1);
         dbRequest.onsuccess = () => {
           const db = dbRequest.result;
           if (db.objectStoreNames.contains('zustand-storage')) {
@@ -554,15 +516,12 @@ export function SettingsPanel() {
     if (result.success) {
       setStoragePaths({ basePath: result.path || dir });
       
-      // 清除 localStorage 中的缓存，确保从新路径加载数据
-      const keysToRemove = Object.keys(localStorage).filter(key => 
-        key.startsWith('moyin-') || key.includes('store')
-      );
-      keysToRemove.forEach(key => localStorage.removeItem(key));
+      // 清除当前用户 localStorage 缓存，确保从新路径加载数据
+      clearCurrentUserLocalStorageData();
       
       // 清除 IndexedDB 缓存
       try {
-        const dbRequest = indexedDB.open('moyin-creator-db', 1);
+        const dbRequest = indexedDB.open('santi-creator-db', 1);
         dbRequest.onsuccess = () => {
           const db = dbRequest.result;
           if (db.objectStoreNames.contains('zustand-storage')) {
@@ -707,33 +666,6 @@ export function SettingsPanel() {
             </div>
           </div>
 
-          {/* MemeFast 购买引导 */}
-          <a
-            href="https://memefast.top"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-3 p-4 bg-gradient-to-r from-orange-500/5 to-primary/5 border border-orange-500/20 rounded-lg hover:border-orange-500/40 transition-colors group"
-          >
-            <div className="p-2 rounded-lg bg-orange-500/10 text-orange-500 shrink-0">
-              <Zap className="h-5 w-5" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-foreground text-sm flex items-center gap-2">
-                魔因API
-                <span className="text-[10px] px-1.5 py-0.5 bg-orange-500/10 text-orange-600 dark:text-orange-400 rounded">
-                  推荐
-                </span>
-              </h3>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                543+ AI 模型一站式接入，支持 GPT / Claude / Gemini / DeepSeek / Sora 等
-              </p>
-            </div>
-            <span className="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-primary group-hover:underline">
-              获取 API Key
-              <ExternalLink className="h-3.5 w-3.5" />
-            </span>
-          </a>
-
           {/* Feature Binding */}
           <FeatureBindingPanel />
 
@@ -750,18 +682,9 @@ export function SettingsPanel() {
                 <h3 className="text-lg font-medium text-foreground mb-2">
                   尚未配置任何供应商
                 </h3>
-                <p className="text-sm text-muted-foreground mb-2">
-                  推荐使用魔因API，支持 543+ 模型一站式接入
+                <p className="text-sm text-muted-foreground mb-4">
+                  请添加春风、auto-vip、自定义 OpenAI 兼容供应商或 RunningHub 后再配置服务映射
                 </p>
-                <a
-                  href="https://memefast.top"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline mb-4"
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                  前往魔因API获取 Key
-                </a>
                 <Button onClick={() => setAddDialogOpen(true)}>
                   <Plus className="h-4 w-4 mr-1" />
                   添加供应商
@@ -809,11 +732,6 @@ export function SettingsPanel() {
                               <div className="text-left">
                                 <h4 className="font-medium text-foreground flex items-center gap-2">
                                   {provider.name}
-                                  {provider.platform === 'memefast' && (
-                                    <span className="text-[10px] px-1.5 py-0.5 bg-orange-500/10 text-orange-600 dark:text-orange-400 rounded font-normal">
-                                      推荐
-                                    </span>
-                                  )}
                                   {configured && (
                                     <span className="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded font-normal">
                                       已配置
@@ -947,21 +865,6 @@ export function SettingsPanel() {
                           </div>
                         </CollapsibleTrigger>
 
-                        {/* MemeFast 购买引导 */}
-                        {provider.platform === 'memefast' && !configured && (
-                          <div className="px-4 pb-2">
-                            <a
-                              href="https://memefast.top"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
-                            >
-                              <ExternalLink className="h-3 w-3" />
-                              前往魔因API获取 Key →
-                            </a>
-                          </div>
-                        )}
-
                         {/* Expandable Content */}
                         <CollapsibleContent>
                           <div className="px-4 pb-4 space-y-3 border-t border-border/50 pt-3">
@@ -1048,7 +951,7 @@ export function SettingsPanel() {
 
               {/* About */}
               <div className="text-center py-8 text-muted-foreground border-t border-border">
-                <p className="text-sm font-medium">魔因漫创 Moyin Creator</p>
+                <p className="text-sm font-medium">三体漫创 Santi Creator</p>
                 <p className="text-xs mt-1">v{appVersion} · AI 驱动的动漫视频创作工具</p>
               </div>
             </div>
@@ -1194,7 +1097,7 @@ export function SettingsPanel() {
 
               {/* About */}
               <div className="text-center py-8 text-muted-foreground border-t border-border">
-                <p className="text-sm font-medium">魔因漫创 Moyin Creator</p>
+                <p className="text-sm font-medium">三体漫创 Santi Creator</p>
                 <p className="text-xs mt-1">v{appVersion} · AI 驱动的动漫视频创作工具</p>
               </div>
             </div>
@@ -1314,7 +1217,7 @@ export function SettingsPanel() {
 
               {/* About */}
               <div className="text-center py-8 text-muted-foreground border-t border-border">
-                <p className="text-sm font-medium">魔因漫创 Moyin Creator</p>
+                <p className="text-sm font-medium">三体漫创 Santi Creator</p>
                 <p className="text-xs mt-1">v{appVersion} · AI 驱动的动漫视频创作工具</p>
               </div>
             </div>
@@ -1583,7 +1486,7 @@ export function SettingsPanel() {
 
               {/* About */}
               <div className="text-center py-8 text-muted-foreground border-t border-border">
-                <p className="text-sm font-medium">魔因漫创 Moyin Creator</p>
+                <p className="text-sm font-medium">三体漫创 Santi Creator</p>
                 <p className="text-xs mt-1">v{appVersion} · AI 驱动的动漫视频创作工具</p>
               </div>
             </div>
@@ -1596,60 +1499,22 @@ export function SettingsPanel() {
         open={addDialogOpen}
         onOpenChange={setAddDialogOpen}
         onSubmit={(providerData) => {
-          // 魔因API：已存在时合并 Key，不重复创建
-          const existingMemefast = providerData.platform === 'memefast'
-            ? providers.find((p) => p.platform === 'memefast')
-            : null;
-          let provider: IProvider;
-          if (existingMemefast) {
-            const oldKeys = parseApiKeys(existingMemefast.apiKey);
-            const newKeys = parseApiKeys(providerData.apiKey);
-            const merged = Array.from(new Set([...oldKeys, ...newKeys]));
-            updateProvider({ ...existingMemefast, apiKey: merged.join(',') });
-            provider = existingMemefast;
-          } else {
-            provider = addProvider(providerData);
-          }
-          // 如果添加的是 memefast 供应商，自动设置默认服务映射（仅在对应服务尚未配置时）
-          if (providerData.platform === 'memefast') {
-            // 使用 provider.id（而非 platform 字符串）避免多供应商时的歧义解析
-            const pid = provider.id;
-            const MEMEFAST_DEFAULT_BINDINGS: Record<string, string> = {
-              // NOTE: MemeFast 端点已升级，旧的 deepseek-v3 已不在列表中，改用 deepseek-v3.2
-              script_analysis: `${pid}:deepseek-v3.2`,
-              character_generation: `${pid}:gemini-3-pro-image-preview`,
-              video_generation: `${pid}:doubao-seedance-1-5-pro-251215`,
-              image_understanding: `${pid}:gemini-2.5-flash`,
+          const provider = addProvider(providerData);
+          if (provider.platform === VOLC_ARK_VIDEO_PLATFORM && provider.model[0]) {
+            const binding = `${provider.id}:${provider.model[0]}`;
+            const appendBinding = (feature: "video_generation" | "freedom_video") => {
+              const current = getFeatureBindings(feature);
+              setFeatureBindings(feature, current.includes(binding) ? current : [...current, binding]);
             };
-            for (const [feature, binding] of Object.entries(MEMEFAST_DEFAULT_BINDINGS)) {
-              const current = getFeatureBindings(feature as AIFeature);
-              // 仅在未配置时设置默认值，避免覆盖用户手动选择
-              if (!current || current.length === 0) {
-                setFeatureBindings(feature as AIFeature, [binding]);
-                continue;
-              }
-              // 自愈：旧默认 deepseek-v3 -> deepseek-v3.2（尽量不破坏多选配置）
-              if (feature === 'script_analysis') {
-                const hasOld = current.some((b) => b.endsWith(':deepseek-v3'));
-                if (hasOld) {
-                  const migrated = current.map((b) => {
-                    if (!b.endsWith(':deepseek-v3')) return b;
-                    const idx = b.indexOf(':');
-                    if (idx <= 0) return binding;
-                    const prefix = b.slice(0, idx);
-                    return `${prefix}:deepseek-v3.2`;
-                  });
-                  const deduped = Array.from(new Set(migrated));
-                  setFeatureBindings(feature as AIFeature, deduped);
-                }
-              }
-            }
+            appendBinding("video_generation");
+            appendBinding("freedom_video");
+            toast.success("已自动绑定到「视频生成」和「自由板块-视频」");
+            return;
           }
           // 添加后自动同步模型列表和端点元数据
-          const finalProviderId = existingMemefast ? existingMemefast.id : provider.id;
           if (parseApiKeys(providerData.apiKey).length > 0) {
-            setSyncingProvider(finalProviderId);
-            syncProviderModels(finalProviderId).then(result => {
+            setSyncingProvider(provider.id);
+            syncProviderModels(provider.id).then(result => {
               setSyncingProvider(null);
               if (result.success) {
                 toast.success(`已自动同步 ${result.count} 个模型`);
@@ -1669,40 +1534,6 @@ export function SettingsPanel() {
         onSave={(provider) => {
           updateProvider(provider);
 
-          // 编辑 memefast 时也自动设置默认服务映射：初始状态会预置一个空 key 的 memefast，
-          // 用户通常是“编辑填 key”，如果不在这里补默认映射，会导致服务映射一直是 0/6。
-          if (provider.platform === 'memefast' && parseApiKeys(provider.apiKey).length > 0) {
-            const pid = provider.id;
-            const MEMEFAST_DEFAULT_BINDINGS: Record<string, string> = {
-              // NOTE: MemeFast 端点已升级，旧的 deepseek-v3 已不在列表中，改用 deepseek-v3.2
-              script_analysis: `${pid}:deepseek-v3.2`,
-              character_generation: `${pid}:gemini-3-pro-image-preview`,
-              video_generation: `${pid}:doubao-seedance-1-5-pro-251215`,
-              image_understanding: `${pid}:gemini-2.5-flash`,
-            };
-            for (const [feature, binding] of Object.entries(MEMEFAST_DEFAULT_BINDINGS)) {
-              const current = getFeatureBindings(feature as AIFeature);
-              if (!current || current.length === 0) {
-                setFeatureBindings(feature as AIFeature, [binding]);
-                continue;
-              }
-              // 自愈：旧默认 deepseek-v3 -> deepseek-v3.2
-              if (feature === 'script_analysis') {
-                const hasOld = current.some((b) => b.endsWith(':deepseek-v3'));
-                if (hasOld) {
-                  const migrated = current.map((b) => {
-                    if (!b.endsWith(':deepseek-v3')) return b;
-                    const idx = b.indexOf(':');
-                    if (idx <= 0) return binding;
-                    const prefix = b.slice(0, idx);
-                    return `${prefix}:deepseek-v3.2`;
-                  });
-                  const deduped = Array.from(new Set(migrated));
-                  setFeatureBindings(feature as AIFeature, deduped);
-                }
-              }
-            }
-          }
           // 编辑保存后自动同步模型列表和端点元数据
           if (parseApiKeys(provider.apiKey).length > 0) {
             setSyncingProvider(provider.id);

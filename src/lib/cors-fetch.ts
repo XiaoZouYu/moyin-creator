@@ -14,13 +14,97 @@
 function isElectron(): boolean {
   return !!(
     typeof window !== 'undefined' &&
-    (window as any).electron
+    (
+      (window as any).electron ||
+      (window as any).ipcRenderer ||
+      (window as any).electronAPI ||
+      navigator.userAgent.includes('Electron')
+    )
   );
 }
 
 /** 检测是否在 Vite 开发服务器中运行 */
 function isViteDev(): boolean {
   return import.meta.env?.DEV === true;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function serializeFormData(formData: FormData): Promise<Array<{
+  name: string;
+  value?: string;
+  fileName?: string;
+  mimeType?: string;
+  dataBase64?: string;
+}>> {
+  const fields: Array<{
+    name: string;
+    value?: string;
+    fileName?: string;
+    mimeType?: string;
+    dataBase64?: string;
+  }> = [];
+
+  for (const [name, value] of formData.entries()) {
+    if (typeof value === 'string') {
+      fields.push({ name, value });
+      continue;
+    }
+
+    fields.push({
+      name,
+      fileName: value instanceof File ? value.name : 'upload.bin',
+      mimeType: value.type || 'application/octet-stream',
+      dataBase64: arrayBufferToBase64(await value.arrayBuffer()),
+    });
+  }
+
+  return fields;
+}
+
+async function serializeElectronBody(body: BodyInit | null | undefined): Promise<{
+  body?: string;
+  bodyBase64?: string;
+  formData?: Array<{
+    name: string;
+    value?: string;
+    fileName?: string;
+    mimeType?: string;
+    dataBase64?: string;
+  }>;
+}> {
+  if (body === undefined || body === null) return {};
+  if (typeof body === 'string') return { body };
+  if (body instanceof URLSearchParams) return { body: body.toString() };
+  if (body instanceof FormData) return { formData: await serializeFormData(body) };
+  if (body instanceof Blob) return { bodyBase64: arrayBufferToBase64(await body.arrayBuffer()) };
+  if (body instanceof ArrayBuffer) return { bodyBase64: arrayBufferToBase64(body) };
+  if (ArrayBuffer.isView(body)) {
+    const view = body as ArrayBufferView;
+    const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    const copy = new Uint8Array(bytes);
+    return { bodyBase64: arrayBufferToBase64(copy.buffer) };
+  }
+  return {};
+}
+
+function removeContentType(headers: Record<string, string>): Record<string, string> {
+  const result = { ...headers };
+  for (const key of Object.keys(result)) {
+    if (key.toLowerCase() === 'content-type') {
+      delete result[key];
+    }
+  }
+  return result;
 }
 
 /**
@@ -39,6 +123,32 @@ export async function corsFetch(
 ): Promise<Response> {
   const targetUrl = url.toString();
 
+  if (typeof window !== 'undefined' && window.electronAPI?.apiFetch) {
+    const requestHeaders = new Headers(init?.headers);
+    const headers: Record<string, string> = {};
+    requestHeaders.forEach((value, key) => {
+      headers[key] = value;
+    });
+
+    const serializedBody = await serializeElectronBody(init?.body);
+    const result = await window.electronAPI.apiFetch({
+      url: targetUrl,
+      method: init?.method,
+      headers,
+      ...serializedBody,
+    });
+
+    if (result.status === 0) {
+      throw new TypeError(result.error || 'Electron main-process API request failed');
+    }
+
+    return new Response(result.body, {
+      status: result.status,
+      statusText: result.statusText,
+      headers: result.headers,
+    });
+  }
+
   // Electron 或非开发环境：直连
   if (isElectron() || !isViteDev()) {
     return fetch(targetUrl, init);
@@ -52,17 +162,25 @@ export async function corsFetch(
   const proxyHeaders = new Headers(init?.headers);
 
   // 把原始 headers 打包进一个特殊头，代理端负责解包
-  const originalHeaders: Record<string, string> = {};
+  let originalHeaders: Record<string, string> = {};
   proxyHeaders.forEach((value, key) => {
     originalHeaders[key] = value;
   });
 
+  const transportHeaders: Record<string, string> = {};
+  let proxyBody = init?.body;
+  if (init?.body instanceof FormData) {
+    originalHeaders = removeContentType(originalHeaders);
+    transportHeaders['x-proxy-form-data'] = '1';
+    transportHeaders['content-type'] = 'application/json';
+    proxyBody = JSON.stringify(await serializeFormData(init.body));
+  }
+  transportHeaders['x-proxy-headers'] = JSON.stringify(originalHeaders);
+
   const proxyInit: RequestInit = {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      'x-proxy-headers': JSON.stringify(originalHeaders),
-    },
+    headers: transportHeaders,
+    body: proxyBody,
   };
 
   return fetch(proxyUrl, proxyInit);

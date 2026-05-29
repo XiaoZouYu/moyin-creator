@@ -51,6 +51,7 @@ import {
 import { uploadMultipleImages } from "@/lib/utils/image-upload";
 import { VISUAL_STYLE_PRESETS, getStyleTokens, getStylesByCategory, type VisualStyleId, DEFAULT_STYLE_ID } from "@/lib/constants/visual-styles";
 import { StylePicker } from "@/components/ui/style-picker";
+import { getFeatureConfig, getFeatureNotConfiguredMessage } from "@/lib/ai/feature-router";
 
 const EXAMPLE_PROMPTS = [
   "一只可爱的小猫在草地上玩耍，追逐蝴蝶",
@@ -114,7 +115,7 @@ export function ScreenplayInput({ onGenerateStoryboard }: ScreenplayInputProps) 
   const isSceneCountValid = sceneValidation.isValid;
 
   const { startScreenplayGeneration, setScreenplayError, config, updateConfig, setScreenplayDraft } = useDirectorStore();
-  const { checkVideoGenerationKeys, checkChatKeys, isFeatureConfigured, getApiKey } = useAPIConfigStore();
+  const { isFeatureConfigured } = useAPIConfigStore();
   const { characters } = useCharacterLibraryStore();
   const { resourceSharing } = useAppSettingsStore();
   const { activeProjectId } = useProjectStore();
@@ -446,9 +447,9 @@ export function ScreenplayInput({ onGenerateStoryboard }: ScreenplayInputProps) 
     }
 
     // Legacy workflow: Check API keys for chat
-    const chatReady = isFeatureConfigured('script_analysis') || checkChatKeys().isAllConfigured;
-    if (!chatReady) {
-      toast.error('请在设置中配置「剧本分析/对话」的服务映射');
+    const scriptConfig = getFeatureConfig('script_analysis');
+    if (!scriptConfig) {
+      toast.error(getFeatureNotConfiguredMessage('script_analysis'));
       return;
     }
 
@@ -475,17 +476,13 @@ export function ScreenplayInput({ onGenerateStoryboard }: ScreenplayInputProps) 
       // Initialize worker and generate screenplay
       const bridge = await initializeWorkerBridge();
       
-      // Get API key and provider
-      const chatApiKey = getApiKey('memefast');
-      const chatProvider = 'memefast';
-      
       const screenplay = await bridge.generateScreenplay(fullPrompt, images, {
         aspectRatio,
         resolution,
         sceneCount,
         styleTokens: actualStyleTokens,
-        apiKey: chatApiKey,
-        chatProvider,
+        apiKey: scriptConfig.apiKey,
+        chatProvider: scriptConfig.platform,
         baseUrl: typeof window !== 'undefined' ? window.location.origin : '',
       } as any);
 
@@ -866,7 +863,7 @@ export function ScreenplayInput({ onGenerateStoryboard }: ScreenplayInputProps) 
       </div>
 
       {/* API status warning - for screenplay we only need chat API */}
-      {!isFeatureConfigured('script_analysis') && !checkChatKeys().isAllConfigured && (
+      {!isFeatureConfigured('script_analysis') && (
         <div className="flex items-start gap-2 p-2 rounded-md bg-yellow-500/10 border border-yellow-500/20">
           <AlertCircle className="h-4 w-4 text-yellow-500 mt-0.5 shrink-0" />
           <div className="text-xs text-yellow-600 dark:text-yellow-400">
@@ -882,7 +879,7 @@ export function ScreenplayInput({ onGenerateStoryboard }: ScreenplayInputProps) 
       <div className="flex gap-2">
         <Button
           onClick={handleSubmit}
-          disabled={!prompt.trim() || isSubmitting || !isSceneCountValid || (!onGenerateStoryboard && !isFeatureConfigured('script_analysis') && !checkChatKeys().isAllConfigured)}
+          disabled={!prompt.trim() || isSubmitting || !isSceneCountValid || (!onGenerateStoryboard && !isFeatureConfigured('script_analysis'))}
           className="flex-1"
           size="lg"
         >

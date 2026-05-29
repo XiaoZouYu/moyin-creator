@@ -3,6 +3,7 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { useCharacterLibraryStore } from "@/stores/character-library-store";
 import { getFeatureConfig } from "@/lib/ai/feature-router";
+import { corsFetch } from "@/lib/cors-fetch";
 import { imageUrlToBase64, submitGridImageRequest } from "@/lib/ai/image-generator";
 import { readImageAsBase64 } from "@/lib/image-storage";
 import type { SplitScene, ShotSizeType } from "@/stores/director-store";
@@ -119,6 +120,7 @@ export async function callImageGenerationApi(
     prompt,
     apiKey: apiKeyToUse,
     baseUrl: imageBaseUrl,
+    providerPlatform: platform,
     aspectRatio,
     referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
     keyManager: imageKeyManager,
@@ -151,7 +153,7 @@ export async function callImageGenerationApi(
       const url = new URL(apiResult.pollUrl || `${imageBaseUrl}/v1/tasks/${taskId}`);
       url.searchParams.set('_ts', Date.now().toString());
 
-      const statusResponse = await fetch(url.toString(), {
+      const statusResponse = await corsFetch(url.toString(), {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${apiKeyToUse}`,

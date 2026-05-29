@@ -23,13 +23,20 @@ export function isRateLimitError(error: unknown): boolean {
   const err = error as any;
 
   // Check status code: 429 rate limit, 500 server error, 502 bad gateway, 503 service unavailable, 529 overloaded
-  if (err.status === 429 || err.status === 500 || err.status === 502 || err.status === 503 || err.status === 529) return true;
-  if (err.code === 429 || err.code === 500 || err.code === 502 || err.code === 503 || err.code === 529) return true;
+  if (err.status === 429 || err.status === 500 || err.status === 502 || err.status === 503 || err.status === 504 || err.status === 524 || err.status === 529) return true;
+  if (err.code === 429 || err.code === 500 || err.code === 502 || err.code === 503 || err.code === 504 || err.code === 524 || err.code === 529) return true;
 
   const message = err.message?.toLowerCase() || "";
   if (
     message.includes("429") ||    message.includes("500") ||    message.includes("502") ||    message.includes("503") ||
+    message.includes("504") ||
+    message.includes("524") ||
     message.includes("529") ||
+    message.includes("fetch failed") ||
+    message.includes("network error") ||
+    message.includes("socket") ||
+    message.includes("econnreset") ||
+    message.includes("etimedout") ||
     message.includes("quota") ||
     message.includes("rate") ||
     message.includes("resource_exhausted") ||

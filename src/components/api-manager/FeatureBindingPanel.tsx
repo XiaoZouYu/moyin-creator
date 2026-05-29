@@ -5,7 +5,7 @@
 
 /**
  * Feature Binding Panel (Multi-Select Mode)
- * 品牌分类模型选择 — 仿 MemeFast pricing 页面
+ * 品牌分类模型选择 — 仿 OpenAI 兼容中转 pricing 页面
  * 一级：品牌 pill（带 SVG logo + 模型数）
  * 二级：模型列表（checkbox 多选）
  */
@@ -34,7 +34,17 @@ import { cn } from "@/lib/utils";
 import type { ReactNode } from "react";
 import { extractBrandFromModel, getBrandInfo } from "@/lib/brand-mapping";
 import { getBrandIcon } from "./brand-icons";
+import {
+  AUTO_VIP_PLATFORM,
+  CHUNFENG_PLATFORM,
+  isPricingMetadataProviderPlatform,
+} from "@/lib/ai/provider-platforms";
 import { getModelDisplayName } from "@/lib/freedom/model-display-names";
+import {
+  VOLC_ARK_SEEDANCE_FALLBACK_MODEL_ID,
+  VOLC_ARK_SEEDANCE_MODEL_ID,
+  VOLC_ARK_VIDEO_PLATFORM,
+} from "@/lib/volc-ark-video";
 
 /**
  * 供应商选项 - 每个功能可选的平台 + 模型
@@ -44,6 +54,7 @@ interface ProviderOption {
   platform: string;
   name: string;
   model: string;
+  capabilities: ModelCapability[];
 }
 
 interface FeatureMeta {
@@ -119,9 +130,12 @@ function parseOptionKey(key: string): { providerIdOrPlatform: string; model: str
 }
 
 const DEFAULT_PLATFORM_CAPABILITIES: Record<string, ModelCapability[]> = {
-  memefast: ["text", "vision", "image_generation", "video_generation"],
+  aggregator: ["text", "vision", "image_generation", "video_generation"],
+  [AUTO_VIP_PLATFORM]: ["text", "vision", "image_generation", "video_generation"],
+  [CHUNFENG_PLATFORM]: ["text", "vision", "image_generation"],
   // RunningHub is used for specialized tools; do not expose it as a default vision/chat provider.
   runninghub: ["image_generation"],
+  [VOLC_ARK_VIDEO_PLATFORM]: ["video_generation"],
 };
 
 /**
@@ -149,6 +163,8 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'cogview-3-plus': ['image_generation'],
   'gemini-imagen': ['image_generation'],
   'gemini-3-pro-image-preview': ['image_generation'],
+  'images2.0': ['image_generation'],
+  'gpt-image-2': ['image_generation'],
   'gpt-image-1.5': ['image_generation'],
 
   // ---- 视频生成模型 ----
@@ -156,6 +172,8 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'gemini-veo': ['video_generation'],
   'doubao-seedance-1-5-pro': ['video_generation'],
   'doubao-seedance-1-5-pro-251215': ['video_generation'],
+  [VOLC_ARK_SEEDANCE_MODEL_ID]: ['video_generation'],
+  [VOLC_ARK_SEEDANCE_FALLBACK_MODEL_ID]: ['video_generation'],
   'doubao-seedream-4-5-251128': ['image_generation'],
   'veo3.1': ['video_generation'],
   'sora-2-all': ['video_generation'],
@@ -202,6 +220,10 @@ function modelSupportsCapability(
 ): boolean {
   if (!required) return true;
 
+  if (provider.capabilities?.includes(required)) {
+    return true;
+  }
+
   // 1. 硬编码映射（精确控制少量预设模型）
   const modelCaps = MODEL_CAPABILITIES[modelName];
   if (modelCaps) {
@@ -228,7 +250,7 @@ function modelSupportsCapability(
     }
   }
 
-  // 3. 模型名称模式推断（非 MemeFast 的其他供应商）
+  // 3. 模型名称模式推断（非 OpenAI 兼容中转 的其他供应商）
   const inferred = classifyModelByName(modelName);
   if (inferred.length > 0) {
     return inferred.includes(required);
@@ -284,11 +306,14 @@ export function FeatureBindingPanel() {
           const mType = modelTypes[model];
           const mTags = modelTags[model];
           if (!modelSupportsCapability(model, provider, feature.requiredCapability, mType, mTags)) continue;
+          const capabilities = classifyModelByName(model);
+          if (modelSupportsCapability(model, provider, "vision", mType, mTags)) capabilities.push("vision");
           opts.push({
             providerId: provider.id,
             platform: provider.platform,
             name: provider.name,
             model,
+            capabilities: Array.from(new Set(capabilities)),
           });
         }
       }
@@ -375,11 +400,11 @@ export function FeatureBindingPanel() {
   // 每个 feature 的搜索关键词
   const [searchQuery, setSearchQuery] = useState<Record<string, string>>({});
 
-  // MemeFast 供应商 ID 集合（用于分组提示）
-  const memefastProviderIds = useMemo(() => {
+  // 支持 pricing_new 元数据的中转供应商 ID 集合（用于分组提示）
+  const aggregatorProviderIds = useMemo(() => {
     const ids = new Set<string>();
     for (const p of providers) {
-      if (p.platform === 'memefast') ids.add(p.id);
+      if (isPricingMetadataProviderPlatform(p.platform)) ids.add(p.id);
     }
     return ids;
   }, [providers]);
@@ -530,15 +555,15 @@ export function FeatureBindingPanel() {
                         </div>
                       )}
 
-                      {/* MemeFast 分组提示横幅 */}
+                      {/* 兼容中转分组提示横幅 */}
                       {(() => {
                         const groups = new Set<string>();
                         for (const binding of currentBindings) {
                           const parsed = parseOptionKey(binding);
                           if (!parsed) continue;
-                          const isMemefast = memefastProviderIds.has(parsed.providerIdOrPlatform)
-                            || parsed.providerIdOrPlatform === 'memefast';
-                          if (!isMemefast) continue;
+                          const isAggregator = aggregatorProviderIds.has(parsed.providerIdOrPlatform)
+                            || isPricingMetadataProviderPlatform(parsed.providerIdOrPlatform);
+                          if (!isAggregator) continue;
                           const mg = modelEnableGroups[parsed.model];
                           if (mg) for (const g of mg) groups.add(g);
                         }
@@ -547,7 +572,7 @@ export function FeatureBindingPanel() {
                         return (
                           <div className="flex flex-col gap-1.5 px-3 py-2.5 rounded-md bg-blue-500/10 border border-blue-500/30">
                             <span className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                              已选的 MemeFast 模型支持以下分组：
+                              已选模型支持以下分组：
                             </span>
                             <div className="flex flex-wrap gap-1.5">
                               {sortedGroups.map(g => (
@@ -557,7 +582,7 @@ export function FeatureBindingPanel() {
                               ))}
                             </div>
                             <span className="text-[11px] text-blue-600/80 dark:text-blue-400/80">
-                              建议在 memefast.top 后台为以上分组都添加 Key，Key 越多可用性越高。
+                              建议在供应商后台为以上分组都添加 Key，Key 越多可用性越高。
                             </span>
                           </div>
                         );

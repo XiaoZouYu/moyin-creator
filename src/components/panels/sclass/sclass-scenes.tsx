@@ -10,6 +10,7 @@
 
 import React, { useState, useCallback, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
+import { corsFetch } from "@/lib/cors-fetch";
 import { Button } from "@/components/ui/button";
 import { 
   useDirectorStore, 
@@ -927,7 +928,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           const statusUrl = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
           statusUrl.searchParams.set('_ts', Date.now().toString());
           
-          const statusResp = await fetch(statusUrl.toString(), {
+          const statusResp = await corsFetch(statusUrl.toString(), {
             headers: { 'Authorization': `Bearer ${apiKey}` },
           });
           
@@ -1342,7 +1343,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
               const progress = Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99);
               updateSplitSceneVideo(scene.id, { videoProgress: progress });
 
-              const statusResponse = await fetch(
+              const statusResponse = await corsFetch(
                 `${baseUrl}/api/ai/task/${submitData.taskId}?apiKey=${encodeURIComponent(apiKey)}&provider=${provider}&type=video`
               );
 
@@ -1411,8 +1412,8 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
     console.log('[SplitScenes] API Store state:', {
       providers: apiStore.providers.length,
       apiKeys: Object.keys(apiStore.apiKeys),
-      memefastKey: apiStore.apiKeys['memefast'] ? 'set' : 'not set',
-      getApiKey_memefast: apiStore.getApiKey('memefast') ? 'set' : 'not set',
+      aggregatorKey: apiStore.apiKeys['aggregator'] ? 'set' : 'not set',
+      getApiKey_aggregator: apiStore.getApiKey('aggregator') ? 'set' : 'not set',
     });
 
     // Use feature router with key rotation support
@@ -1603,7 +1604,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
 
       console.log('[SplitScenes] image_with_roles:', imageWithRoles.length, 'images', imageWithRoles.map(i => i.role));
 
-      // 调用统一视频生成 API（自动路由到正确的 MemeFast 端点）
+      // 调用统一视频生成 API（自动路由到正确的 OpenAI 兼容中转 端点）
       const videoUrl = await callVideoGenerationApi(
         apiKey,
         fullPrompt,
@@ -1852,7 +1853,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           const url = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
           url.searchParams.set('_ts', Date.now().toString());
 
-          const statusResponse = await fetch(url.toString(), {
+          const statusResponse = await corsFetch(url.toString(), {
             method: 'GET',
             headers: {
               'Authorization': `Bearer ${apiKey}`,
@@ -2394,7 +2395,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           const statusUrl = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
           statusUrl.searchParams.set('_ts', Date.now().toString());
           
-          const statusResp = await fetch(statusUrl.toString(), {
+          const statusResp = await corsFetch(statusUrl.toString(), {
             headers: { 'Authorization': `Bearer ${apiKey}` },
           });
           
@@ -2675,7 +2676,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         else updateSplitSceneImageStatus(sceneId, { imageProgress: progress });
         const url = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
         url.searchParams.set('_ts', Date.now().toString());
-        const statusResp = await fetch(url.toString(), { method: 'GET', headers: { 'Authorization': `Bearer ${apiKeyToUse}`, 'Cache-Control': 'no-cache' } });
+        const statusResp = await corsFetch(url.toString(), { method: 'GET', headers: { 'Authorization': `Bearer ${apiKeyToUse}`, 'Cache-Control': 'no-cache' } });
         if (!statusResp.ok) throw new Error(`Failed to check task status: ${statusResp.status}`);
         const statusData = await statusResp.json();
         const status = (statusData.status ?? statusData.data?.status ?? 'unknown').toString().toLowerCase();
@@ -2861,7 +2862,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           const url = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
           url.searchParams.set('_ts', Date.now().toString());
 
-          const statusResponse = await fetch(url.toString(), {
+          const statusResponse = await corsFetch(url.toString(), {
             method: 'GET',
             headers: {
               'Authorization': `Bearer ${apiKey}`,

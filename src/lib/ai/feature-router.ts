@@ -36,30 +36,6 @@ export interface FeatureConfig {
 const featureRoundRobinIndex: Map<AIFeature, number> = new Map();
 
 /**
- * Default mapping for features to platforms (fallback when not explicitly bound)
- */
-const FEATURE_PLATFORM_MAP: Partial<Record<AIFeature, string>> = {
-  script_analysis: 'memefast',
-  character_generation: 'memefast',
-  video_generation: 'memefast',
-  image_understanding: 'memefast',
-  chat: 'memefast',
-  freedom_image: 'memefast',
-  freedom_video: 'memefast',
-};
-
-/**
- * 默认模型映射：当供应商未显式绑定模型时，为特定功能提供默认模型
- * 仅在 fallback 路径中使用（用户显式绑定优先）
- */
-const FEATURE_DEFAULT_MODEL: Partial<Record<AIFeature, Record<string, string>>> = {
-  image_understanding: {
-    memefast: 'gemini-3.1-pro-preview', // 魔音API 默认使用 Gemini 3.1 Pro
-  },
-};
-
-
-/**
  * 解析 platform:model 格式
  */
 function parseBindingValue(binding: string): { platform: string; model?: string } | null {
@@ -145,36 +121,6 @@ export function getFeatureConfig(feature: AIFeature): FeatureConfig | null {
   const configs = getAllFeatureConfigs(feature);
   
   if (configs.length === 0) {
-    // Fallback: 尝试使用默认平台映射
-    const store = useAPIConfigStore.getState();
-    const defaultPlatform = FEATURE_PLATFORM_MAP[feature];
-    if (defaultPlatform) {
-      const provider = store.providers.find(p => p.platform === defaultPlatform);
-      if (provider) {
-        const keys = parseApiKeys(provider.apiKey);
-        if (keys.length > 0) {
-          const fallbackModel = FEATURE_DEFAULT_MODEL[feature]?.[provider.platform] || provider.model?.[0] || '';
-          const scopeKey = `${feature}:${fallbackModel || 'default'}`;
-          const keyManager = getProviderKeyManager(provider.id, provider.apiKey, scopeKey);
-          const featureInfo = AI_FEATURES.find(f => f.key === feature);
-          // 优先使用功能默认模型，否则取供应商第一个模型
-          const defaultModel = FEATURE_DEFAULT_MODEL[feature]?.[provider.platform];
-          const model = defaultModel || provider.model?.[0] || '';
-          return {
-            feature,
-            featureName: featureInfo?.name || feature,
-            provider,
-            apiKey: keyManager.getCurrentKey() || keys[0],
-            allApiKeys: keys,
-            keyManager,
-            platform: provider.platform,
-            baseUrl: provider.baseUrl,
-            models: provider.model || [],
-            model,
-          };
-        }
-      }
-    }
     console.warn(`[FeatureRouter] No provider bound for feature: ${feature}`);
     return null;
   }
@@ -283,7 +229,7 @@ export async function callFeatureAPI(
   const disableThinking = options?.disableThinking ?? true;
   return await callChatAPI(systemPrompt, userPrompt, {
     apiKey: config.allApiKeys.join(','),
-    provider: 'openai',
+    provider: config.platform || 'openai',
     baseUrl,
     model,
     temperature: options?.temperature,

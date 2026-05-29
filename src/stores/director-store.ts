@@ -548,9 +548,9 @@ const defaultConfig: GenerationConfig = {
   videoSize: '480p',
   sceneCount: 5,
   concurrency: 1,
-  imageProvider: 'memefast',
-  videoProvider: 'memefast',
-  chatProvider: 'memefast',
+  imageProvider: 'mock',
+  videoProvider: 'mock',
+  chatProvider: 'mock',
 };
 
 // ==================== Default Project Data ====================
@@ -2120,7 +2120,7 @@ export const useDirectorStore = create<DirectorStore>()(
   },
     }),
     {
-      name: 'moyin-director-store',
+      name: 'santi-director-store',
       storage: createJSONStorage(() => createProjectScopedStorage('director')),
       partialize: (state) => {
         // Helper: strip base64 data from a string field (keep local-image:// and https://)

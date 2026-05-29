@@ -1,7 +1,7 @@
 <p align="center">
-  <img src="build/icon.png" width="120" alt="魔因漫创 Logo" />
+  <img src="build/icon.png" width="120" alt="三体漫创 Logo" />
 </p>
-<h1 align="center">魔因漫创 Moyin Creator</h1>
+<h1 align="center">三体漫创 Santi Creator</h1>
 
 <p align="center">
   <strong>🎬 AI 影视生产级工具 · 支持 Seedance 2.0 · 剧本到成片全流程批量化</strong>
@@ -9,8 +9,8 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License" /></a>
-  <a href="https://github.com/MemeCalculate/moyin-creator/releases"><img src="https://img.shields.io/github/v/release/MemeCalculate/moyin-creator" alt="Release" /></a>
-  <a href="https://github.com/MemeCalculate/moyin-creator/stargazers"><img src="https://img.shields.io/github/stars/MemeCalculate/moyin-creator" alt="Stars" /></a>
+  <a href="https://github.com/Santi/santi-creator/releases"><img src="https://img.shields.io/github/v/release/Santi/santi-creator" alt="Release" /></a>
+  <a href="https://github.com/Santi/santi-creator/stargazers"><img src="https://img.shields.io/github/stars/Santi/santi-creator" alt="Stars" /></a>
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@
 
 ## 简介
 
-**魔因漫创** 是一款面向 AI 影视创作者的生产级工具。五大板块环环相扣，覆盖从剧本到成片的完整创作链路：
+**三体漫创** 是一款面向 AI 影视创作者的生产级工具。五大板块环环相扣，覆盖从剧本到成片的完整创作链路：
 
 > **📝 剧本 → 🎭 角色 → 🌄 场景 → 🎬 导演 → ⭐ S级（Seedance 2.0）**
 
@@ -109,8 +109,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/MemeCalculate/moyin-creator.git
-cd moyin-creator
+git clone https://github.com/Santi/santi-creator.git
+cd santi-creator
 
 # 安装依赖
 npm install
@@ -147,7 +147,7 @@ npx electron-vite build
 ### 项目结构
 
 ```
-moyin-creator/
+santi-creator/
 ├── electron/              # Electron 主进程 + Preload
 │   ├── main.ts            # 主进程（存储管理、文件系统、协议处理）
 │   └── preload.ts         # 安全桥接层
@@ -183,7 +183,7 @@ moyin-creator/
 ## 联系
 
 - 📧 Email: [memecalculate@gmail.com](mailto:memecalculate@gmail.com)
-- 🐙 GitHub: [https://github.com/MemeCalculate/moyin-creator](https://github.com/MemeCalculate/moyin-creator)
+- 🐙 GitHub: [https://github.com/Santi/santi-creator](https://github.com/Santi/santi-creator)
 
 ### 联系我们
 
@@ -196,7 +196,7 @@ moyin-creator/
 
 ---
 
-<p align="center">Made with ❤️ by <a href="https://github.com/MemeCalculate">MemeCalculate</a></p>
+<p align="center">Made with ❤️ by <a href="https://github.com/Santi">Santi</a></p>
 
 
 

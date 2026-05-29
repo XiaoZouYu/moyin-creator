@@ -8,18 +8,35 @@
  */
 
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import type { ProviderId, ServiceType } from '@opencut/ai-core';
-import { 
-  type IProvider, 
-  DEFAULT_PROVIDERS, 
-  generateId, 
+import {
+  type IProvider,
+  DEFAULT_PROVIDERS,
+  generateId,
   parseApiKeys,
   maskApiKey as maskKey,
   updateProviderKeys,
   classifyModelByName,
 } from '@/lib/api-key-manager';
 import { injectDiscoveryCache, type DiscoveredModelLimits } from '@/lib/ai/model-registry';
+import {
+  AUTO_VIP_BASE_URL,
+  AUTO_VIP_NAME,
+  AUTO_VIP_PLATFORM,
+  LEGACY_AGGREGATOR_PLATFORM,
+  isPricingMetadataProviderPlatform,
+  migrateLegacyAggregatorProvider,
+  normalizeBuiltInProvider,
+} from '@/lib/ai/provider-platforms';
+import { corsFetch } from '@/lib/cors-fetch';
+import {
+  VOLC_ARK_SEEDANCE_MODEL_ID,
+  VOLC_ARK_VIDEO_BASE_URL,
+  VOLC_ARK_VIDEO_PLATFORM,
+  isVolcArkVideoPlatform,
+} from '@/lib/volc-ark-video';
+import { userScopedLocalStorage } from '@/lib/user-session';
 
 // Re-export IProvider for convenience
 export type { IProvider } from '@/lib/api-key-manager';
@@ -30,7 +47,7 @@ export type { IProvider } from '@/lib/api-key-manager';
  * AI 功能模块类型
  * 每个功能可以绑定一个 API 供应商
  */
-export type AIFeature = 
+export type AIFeature =
   | 'script_analysis'       // 剧本分析
   | 'character_generation'  // 角色图片生成
   | 'scene_generation'      // 场景图片生成
@@ -43,7 +60,7 @@ export type AIFeature =
 /**
  * 功能绑定配置
  * 每个功能可绑定多个供应商/模型（多选）
- * 格式: platform:model 数组，如 ['memefast:deepseek-v3.2', 'memefast:gemini-3-pro-image-preview']
+ * 格式: platform:model 数组，如 ['custom:deepseek-v3.2', 'custom:gemini-3-pro-image-preview']
  */
 export type FeatureBindings = Record<AIFeature, string[] | null>;
 
@@ -64,6 +81,34 @@ export const AI_FEATURES: Array<{
   { key: 'freedom_image', name: '自由板块-图片', description: '自由板块独立的图片生成配置' },
   { key: 'freedom_video', name: '自由板块-视频', description: '自由板块独立的视频生成配置' },
 ];
+
+async function readErrorSnippet(response: Response): Promise<string> {
+  try {
+    const text = await response.text();
+    return text ? `：${text.slice(0, 180)}` : '';
+  } catch {
+    return '';
+  }
+}
+
+function getNetworkErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    if (/failed to fetch|networkerror|load failed/i.test(error.message)) {
+      return '网络请求失败，可能是 CORS、证书、代理或服务未响应';
+    }
+    return error.message;
+  }
+  return '网络请求失败';
+}
+
+function normalizeModelListResponse(json: unknown): Array<{ id: string; supported_endpoint_types?: string[] } | string> {
+  if (Array.isArray(json)) return json as Array<{ id: string; supported_endpoint_types?: string[] } | string>;
+  if (json && typeof json === 'object') {
+    const data = (json as { data?: unknown }).data;
+    if (Array.isArray(data)) return data as Array<{ id: string; supported_endpoint_types?: string[] } | string>;
+  }
+  return [];
+}
 
 
 // ==================== Types ====================
@@ -370,37 +415,37 @@ export interface LegacyImageHostConfig {
 interface APIConfigState {
   // Provider-based storage (v2)
   providers: IProvider[];
-  
+
   // Feature bindings - which provider to use for each feature
   featureBindings: FeatureBindings;
-  
+
   // Legacy: API Keys (v1, for migration)
   apiKeys: Partial<Record<ProviderId, string>>;
-  
+
   // Concurrency control
   concurrency: number;
-  
+
   // Aspect ratio preference
   aspectRatio: '16:9' | '9:16';
   orientation: 'landscape' | 'portrait';
-  
+
   // Advanced generation options
   advancedOptions: AdvancedGenerationOptions;
-  
+
   // Image host providers (independent mapping)
   imageHostProviders: ImageHostProvider[];
-  
+
   // Model endpoint types from API sync (model ID -> supported_endpoint_types)
   modelEndpointTypes: Record<string, string[]>;
-  
-  // Model metadata from /api/pricing_new (MemeFast platform classification)
+
+  // Model metadata from /api/pricing_new (compatible aggregator classification)
   // model_name -> model_type: "文本" | "图像" | "音视频" | "检索"
   modelTypes: Record<string, string>;
   // model_name -> tags: ["对话","识图","工具"] etc.
   modelTags: Record<string, string[]>;
-  // model_name -> enable_groups: ["官转","纯AZ","default"] (MemeFast only)
+  // model_name -> enable_groups: ["官转","纯AZ","default"] (compatible aggregator only)
   modelEnableGroups: Record<string, string[]>;
-  
+
   // Discovered model limits (Error-driven Discovery)
   // model_name -> { maxOutput?, contextWindow?, discoveredAt }
   discoveredModelLimits: Record<string, DiscoveredModelLimits>;
@@ -414,7 +459,7 @@ interface APIConfigActions {
   getProviderByPlatform: (platform: string) => IProvider | undefined;
   getProviderById: (id: string) => IProvider | undefined;
   syncProviderModels: (providerId: string) => Promise<{ success: boolean; count: number; error?: string }>;
-  
+
   // Feature binding management (multi-select)
   setFeatureBindings: (feature: AIFeature, bindings: string[] | null) => void;
   toggleFeatureBinding: (feature: AIFeature, binding: string) => void;
@@ -425,24 +470,24 @@ interface APIConfigActions {
   setFeatureBinding: (feature: AIFeature, providerId: string | null) => void;
   getFeatureBinding: (feature: AIFeature) => string | null;
   getProviderForFeature: (feature: AIFeature) => IProvider | undefined;
-  
+
   // Legacy API Key management (v1 compat)
   setApiKey: (provider: ProviderId, key: string) => void;
   getApiKey: (provider: ProviderId) => string;
   clearApiKey: (provider: ProviderId) => void;
   clearAllApiKeys: () => void;
-  
+
   // Concurrency
   setConcurrency: (n: number) => void;
-  
+
   // Aspect ratio
   setAspectRatio: (ratio: '16:9' | '9:16') => void;
   toggleOrientation: () => void;
-  
+
   // Advanced generation options
   setAdvancedOption: <K extends keyof AdvancedGenerationOptions>(key: K, value: AdvancedGenerationOptions[K]) => void;
   resetAdvancedOptions: () => void;
-  
+
   // Image host provider management
   addImageHostProvider: (provider: Omit<ImageHostProvider, 'id'>) => ImageHostProvider;
   updateImageHostProvider: (provider: ImageHostProvider) => void;
@@ -450,18 +495,18 @@ interface APIConfigActions {
   getImageHostProviderById: (id: string) => ImageHostProvider | undefined;
   getEnabledImageHostProviders: () => ImageHostProvider[];
   isImageHostConfigured: () => boolean;
-  
+
   // Validation
   isConfigured: (provider: ProviderId) => boolean;
   isPlatformConfigured: (platform: string) => boolean;
   checkRequiredKeys: (services: ServiceType[]) => APIConfigStatus;
   checkChatKeys: () => APIConfigStatus;
   checkVideoGenerationKeys: () => APIConfigStatus;
-  
+
   // Display helpers
   maskApiKey: (key: string) => string;
   getAllConfigs: () => { provider: ProviderId; configured: boolean; masked: string }[];
-  
+
   // Model limits discovery
   getDiscoveredModelLimits: (model: string) => DiscoveredModelLimits | undefined;
   setDiscoveredModelLimits: (model: string, limits: Partial<DiscoveredModelLimits>) => void;
@@ -481,11 +526,11 @@ export interface APIConfigStatus {
 
 /**
  * 供应商信息映射
- * 1. memefast - 魔因API，全功能 AI 中转（推荐）
+ * 1. auto-vip - 兼容旧数据的 AI 中转供应商
  * 2. runninghub - RunningHub，视角切换/多角度生成
  */
 const PROVIDER_INFO: Record<ProviderId, { name: string; services: ServiceType[] }> = {
-  memefast: { name: '魔因API', services: ['chat', 'image', 'video', 'vision'] },
+  aggregator: { name: AUTO_VIP_NAME, services: ['chat', 'image', 'video', 'vision'] },
   runninghub: { name: 'RunningHub', services: ['image', 'vision'] },
   openai: { name: 'OpenAI', services: [] },
   custom: { name: 'Custom', services: [] },
@@ -506,9 +551,6 @@ const defaultFeatureBindings: FeatureBindings = {
 };
 const defaultImageHostProviders: ImageHostProvider[] = createDefaultImageHostProviders();
 
-// Pre-fill MemeFast for new users (no API Key, just the provider entry)
-const memefastTemplate = DEFAULT_PROVIDERS.find(p => p.platform === 'memefast');
-
 function omitRecordKeys<T>(record: Record<string, T>, keys: Iterable<string>): Record<string, T> {
   const next = { ...record };
   for (const key of keys) {
@@ -517,10 +559,36 @@ function omitRecordKeys<T>(record: Record<string, T>, keys: Iterable<string>): R
   return next;
 }
 
+function normalizeKnownProvider<T extends Omit<IProvider, 'id'> | IProvider>(provider: T): T {
+  const builtInProvider = normalizeBuiltInProvider(provider);
+  if (!isVolcArkVideoPlatform(builtInProvider.platform)) return builtInProvider;
+  const models = builtInProvider.model?.length ? builtInProvider.model : [VOLC_ARK_SEEDANCE_MODEL_ID];
+  return {
+    ...builtInProvider,
+    name: builtInProvider.name?.trim() || '火山方舟视频生成',
+    baseUrl: VOLC_ARK_VIDEO_BASE_URL,
+    model: models,
+    capabilities: ['video_generation'],
+  } as T;
+}
+
+function buildVolcArkVideoMetadata(models: string[]) {
+  const modelEndpointTypes: Record<string, string[]> = {};
+  const modelTypes: Record<string, string> = {};
+  const modelTags: Record<string, string[]> = {};
+
+  for (const model of models) {
+    if (!model) continue;
+    modelEndpointTypes[model] = ['火山方舟视频生成'];
+    modelTypes[model] = '音视频';
+    modelTags[model] = ['视频', 'Seedance'];
+  }
+
+  return { modelEndpointTypes, modelTypes, modelTags };
+}
+
 const initialState: APIConfigState = {
-  providers: memefastTemplate
-    ? [{ id: generateId(), ...memefastTemplate, apiKey: '' }]
-    : [],
+  providers: [],
   featureBindings: defaultFeatureBindings,
   apiKeys: {},
   concurrency: 1,  // Default to serial execution (single key rate limit)
@@ -543,14 +611,25 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       ...initialState,
 
       // ==================== Provider Management (v2) ====================
-      
+
       addProvider: (providerData) => {
+        const normalizedProviderData = normalizeKnownProvider(providerData);
         const newProvider: IProvider = {
-          ...providerData,
+          ...normalizedProviderData,
           id: generateId(),
         };
+        const volcArkMetadata = isVolcArkVideoPlatform(newProvider.platform)
+          ? buildVolcArkVideoMetadata(newProvider.model)
+          : null;
         set((state) => ({
           providers: [...state.providers, newProvider],
+          ...(volcArkMetadata
+            ? {
+                modelEndpointTypes: { ...state.modelEndpointTypes, ...volcArkMetadata.modelEndpointTypes },
+                modelTypes: { ...state.modelTypes, ...volcArkMetadata.modelTypes },
+                modelTags: { ...state.modelTags, ...volcArkMetadata.modelTags },
+              }
+            : {}),
         }));
         // Update key manager
         updateProviderKeys(newProvider.id, newProvider.apiKey);
@@ -559,12 +638,23 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       },
 
       updateProvider: (provider) => {
+        const normalizedProvider = normalizeKnownProvider(provider) as IProvider;
+        const volcArkMetadata = isVolcArkVideoPlatform(normalizedProvider.platform)
+          ? buildVolcArkVideoMetadata(normalizedProvider.model)
+          : null;
         set((state) => ({
-          providers: state.providers.map(p => p.id === provider.id ? provider : p),
+          providers: state.providers.map(p => p.id === normalizedProvider.id ? normalizedProvider : p),
+          ...(volcArkMetadata
+            ? {
+                modelEndpointTypes: { ...state.modelEndpointTypes, ...volcArkMetadata.modelEndpointTypes },
+                modelTypes: { ...state.modelTypes, ...volcArkMetadata.modelTypes },
+                modelTags: { ...state.modelTags, ...volcArkMetadata.modelTags },
+              }
+            : {}),
         }));
         // Update key manager
-        updateProviderKeys(provider.id, provider.apiKey);
-        console.log(`[APIConfig] Updated provider: ${provider.name}`);
+        updateProviderKeys(normalizedProvider.id, normalizedProvider.apiKey);
+        console.log(`[APIConfig] Updated provider: ${normalizedProvider.name}`);
       },
 
       removeProvider: (id) => {
@@ -589,6 +679,18 @@ export const useAPIConfigStore = create<APIConfigStore>()(
         const provider = get().providers.find(p => p.id === providerId);
         if (!provider) return { success: false, count: 0, error: '供应商不存在' };
 
+        if (isVolcArkVideoPlatform(provider.platform)) {
+          const normalizedProvider = normalizeKnownProvider(provider) as IProvider;
+          const metadata = buildVolcArkVideoMetadata(normalizedProvider.model);
+          set((state) => ({
+            providers: state.providers.map(p => p.id === normalizedProvider.id ? normalizedProvider : p),
+            modelEndpointTypes: { ...state.modelEndpointTypes, ...metadata.modelEndpointTypes },
+            modelTypes: { ...state.modelTypes, ...metadata.modelTypes },
+            modelTags: { ...state.modelTags, ...metadata.modelTags },
+          }));
+          return { success: true, count: normalizedProvider.model.length };
+        }
+
         const keys = parseApiKeys(provider.apiKey);
         if (keys.length === 0) return { success: false, count: 0, error: '请先配置 API Key' };
 
@@ -598,20 +700,20 @@ export const useAPIConfigStore = create<APIConfigStore>()(
         try {
           // 用 Set 收集所有 key 的模型，自动去重
           const allModelIds = new Set<string>();
-          const isMemefast = provider.platform === 'memefast';
-          const memefastTypes: Record<string, string> = {};
-          const memefastTags: Record<string, string[]> = {};
-          const memefastEndpoints: Record<string, string[]> = {};
-          const memefastEnableGroups: Record<string, string[]> = {};
+          const usesPricingMetadata = isPricingMetadataProviderPlatform(provider.platform);
+          const aggregatorTypes: Record<string, string> = {};
+          const aggregatorTags: Record<string, string[]> = {};
+          const aggregatorEndpoints: Record<string, string[]> = {};
+          const aggregatorEnableGroups: Record<string, string[]> = {};
 
-          if (isMemefast) {
-            // MemeFast: /api/pricing_new 获取全量元数据（公开接口）
+          if (usesPricingMetadata) {
+            // auto-vip / legacy aggregator: /api/pricing_new 获取全量元数据（公开接口）
             const domain = baseUrl.replace(/\/v\d+$/, '');
             const pricingUrl = `${domain}/api/pricing_new`;
 
-            const response = await fetch(pricingUrl);
+            const response = await corsFetch(pricingUrl);
             if (!response.ok) {
-              return { success: false, count: 0, error: `pricing_new API 返回 ${response.status}` };
+              return { success: false, count: 0, error: `pricing_new API 返回 ${response.status}${await readErrorSnippet(response)}` };
             }
 
             const json = await response.json();
@@ -622,23 +724,23 @@ export const useAPIConfigStore = create<APIConfigStore>()(
 
             console.log(`[APIConfig] Fetched ${data.length} models from pricing_new`);
 
-            // Collect fresh MemeFast metadata first.
+            // Collect fresh OpenAI 兼容中转 metadata first.
             // After sync completes we remove only this provider's stale entries,
             // then merge these fresh values into the latest store state.
             for (const m of data) {
               const name = m.model_name;
               if (!name) continue;
-              if (m.model_type) memefastTypes[name] = m.model_type;
+              if (m.model_type) aggregatorTypes[name] = m.model_type;
               if (m.tags) {
-                memefastTags[name] = typeof m.tags === 'string'
+                aggregatorTags[name] = typeof m.tags === 'string'
                   ? m.tags.split(',').map((t: string) => t.trim()).filter(Boolean)
                   : m.tags;
               }
               if (Array.isArray(m.supported_endpoint_types)) {
-                memefastEndpoints[name] = m.supported_endpoint_types;
+                aggregatorEndpoints[name] = m.supported_endpoint_types;
               }
               if (Array.isArray(m.enable_groups) && m.enable_groups.length > 0) {
-                memefastEnableGroups[name] = m.enable_groups;
+                aggregatorEnableGroups[name] = m.enable_groups;
               }
             }
 
@@ -656,27 +758,28 @@ export const useAPIConfigStore = create<APIConfigStore>()(
 
             for (let ki = 0; ki < keys.length; ki++) {
               try {
-                const resp = await fetch(modelsUrl, {
+                const resp = await corsFetch(modelsUrl, {
                   headers: { 'Authorization': `Bearer ${keys[ki]}` },
                 });
                 if (!resp.ok) {
-                  console.warn(`[APIConfig] MemeFast key#${ki + 1} /v1/models returned ${resp.status}, skip`);
+                  const detail = await readErrorSnippet(resp);
+                  console.warn(`[APIConfig] OpenAI 兼容中转 key#${ki + 1} /v1/models returned ${resp.status}${detail}, skip`);
                   continue;
                 }
                 const j = await resp.json();
-                const arr: Array<{ id: string; supported_endpoint_types?: string[] } | string> = j.data || j;
+                const arr = normalizeModelListResponse(j);
                 if (!Array.isArray(arr)) continue;
                 for (const m of arr) {
                   const id = typeof m === 'string' ? m : m.id;
                   if (typeof id === 'string' && id.length > 0) allModelIds.add(id);
                   // 补充 endpoint_types
                   if (typeof m !== 'string' && m.id && Array.isArray(m.supported_endpoint_types)) {
-                    memefastEndpoints[m.id] = m.supported_endpoint_types as string[];
+                    aggregatorEndpoints[m.id] = m.supported_endpoint_types as string[];
                   }
                 }
-                console.log(`[APIConfig] MemeFast key#${ki + 1} contributed models, total so far: ${allModelIds.size}`);
+                console.log(`[APIConfig] ${provider.name} key#${ki + 1} contributed models, total so far: ${allModelIds.size}`);
               } catch (e) {
-                console.warn(`[APIConfig] MemeFast key#${ki + 1} /v1/models failed:`, e);
+                console.warn(`[APIConfig] ${provider.name} key#${ki + 1} /v1/models failed: ${getNetworkErrorMessage(e)}`, e);
               }
             }
           } else {
@@ -691,18 +794,18 @@ export const useAPIConfigStore = create<APIConfigStore>()(
 
             for (let ki = 0; ki < keys.length; ki++) {
               try {
-                const response = await fetch(modelsUrl, {
+                const response = await corsFetch(modelsUrl, {
                   headers: { 'Authorization': `Bearer ${keys[ki]}` },
                 });
 
                 if (!response.ok) {
-                  lastError = `key#${ki + 1} API 返回 ${response.status}`;
+                  lastError = `key#${ki + 1} API 返回 ${response.status}${await readErrorSnippet(response)}`;
                   console.warn(`[APIConfig] ${lastError}`);
                   continue;
                 }
 
                 const json = await response.json();
-                const data: Array<{ id: string; [key: string]: unknown }> = json.data || json;
+                const data = normalizeModelListResponse(json);
                 if (!Array.isArray(data) || data.length === 0) {
                   console.warn(`[APIConfig] key#${ki + 1} returned empty model list`);
                   continue;
@@ -719,7 +822,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
                 }
                 console.log(`[APIConfig] key#${ki + 1} contributed models, total so far: ${allModelIds.size}`);
               } catch (e) {
-                lastError = `key#${ki + 1} 网络请求失败`;
+                lastError = `key#${ki + 1} ${getNetworkErrorMessage(e)}`;
                 console.warn(`[APIConfig] ${lastError}:`, e);
               }
             }
@@ -743,27 +846,27 @@ export const useAPIConfigStore = create<APIConfigStore>()(
             return { success: false, count: 0, error: '未获取到任何模型' };
           }
 
-          if (isMemefast) {
+          if (usesPricingMetadata) {
             const providerOwnedModels = new Set([...(provider.model || []), ...modelIds]);
             set((state) => ({
               modelTypes: {
                 ...omitRecordKeys(state.modelTypes, providerOwnedModels),
-                ...memefastTypes,
+                ...aggregatorTypes,
               },
               modelTags: {
                 ...omitRecordKeys(state.modelTags, providerOwnedModels),
-                ...memefastTags,
+                ...aggregatorTags,
               },
               modelEndpointTypes: {
                 ...omitRecordKeys(state.modelEndpointTypes, providerOwnedModels),
-                ...memefastEndpoints,
+                ...aggregatorEndpoints,
               },
               modelEnableGroups: {
                 ...omitRecordKeys(state.modelEnableGroups, providerOwnedModels),
-                ...memefastEnableGroups,
+                ...aggregatorEnableGroups,
               },
             }));
-            console.log(`[APIConfig] Stored MemeFast metadata: ${Object.keys(memefastTypes).length} types, ${Object.keys(memefastTags).length} tags`);
+            console.log(`[APIConfig] Stored ${provider.name} metadata: ${Object.keys(aggregatorTypes).length} types, ${Object.keys(aggregatorTags).length} tags`);
           }
 
           // Replace provider model list with merged & deduped data
@@ -773,12 +876,12 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           return { success: true, count: modelIds.length };
         } catch (error) {
           console.error('[APIConfig] Model sync failed:', error);
-          return { success: false, count: 0, error: '网络请求失败，请检查网络' };
+          return { success: false, count: 0, error: getNetworkErrorMessage(error) };
         }
       },
 
       // ==================== Feature Binding Management (Multi-Select) ====================
-      
+
       // 设置功能的所有绑定（替换）
       setFeatureBindings: (feature, bindings) => {
         set((state) => ({
@@ -786,14 +889,14 @@ export const useAPIConfigStore = create<APIConfigStore>()(
         }));
         console.log(`[APIConfig] Set ${feature} -> [${bindings?.join(', ') || '无'}]`);
       },
-      
+
       // 切换单个绑定（添加/移除）
       toggleFeatureBinding: (feature, binding) => {
         const current = get().featureBindings[feature] || [];
         const exists = current.includes(binding);
-        
+
         // 同时检查 legacy 格式（platform:model）是否存在
-        // 例如 binding = "{id}:deepseek-v3" 但 current 里可能有 "memefast:deepseek-v3"
+        // 例如 binding = "{id}:deepseek-v3" 但 current 里可能有 "aggregator:deepseek-v3"
         let legacyMatch: string | null = null;
         const idx = binding.indexOf(':');
         if (idx > 0) {
@@ -807,7 +910,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
             }
           }
         }
-        
+
         if (exists || legacyMatch) {
           // 删除：同时移除精确匹配和 legacy 格式
           const newBindings = current.filter(b => b !== binding && b !== legacyMatch);
@@ -838,12 +941,13 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       getProvidersForFeature: (feature) => {
         const bindings = get().getFeatureBindings(feature);
         const results: Array<{ provider: IProvider; model: string }> = [];
-        
+
         for (const binding of bindings) {
           const idx = binding.indexOf(':');
           if (idx <= 0) continue;
           const platformOrId = binding.slice(0, idx);
-          const model = binding.slice(idx + 1);
+          const model = binding.slice(idx + 1).trim();
+          if (!model) continue;
           // 1. 优先按 provider.id 精确匹配（始终安全）
           let provider = get().providers.find(p => p.id === platformOrId);
           // 2. Fallback: 按 platform 匹配，但仅当该 platform 下只有一个供应商时
@@ -877,7 +981,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       isFeatureConfigured: (feature) => {
         return get().getProvidersForFeature(feature).length > 0;
       },
-      
+
       // Legacy single-select compat (deprecated, for backward compat)
       setFeatureBinding: (feature, providerId) => {
         // 单选兼容：设置为单元素数组
@@ -895,19 +999,19 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       },
 
       // ==================== Legacy API Key management (v1 compat) ====================
-      
+
       setApiKey: (provider, key) => {
         // Update legacy apiKeys
         set((state) => ({
           apiKeys: { ...state.apiKeys, [provider]: key },
         }));
-        
+
         // Also update provider if exists
         const existingProvider = get().getProviderByPlatform(provider);
         if (existingProvider) {
           get().updateProvider({ ...existingProvider, apiKey: key });
         }
-        
+
         console.log(`[APIConfig] Updated ${provider} API key: ${get().maskApiKey(key)}`);
       },
 
@@ -930,31 +1034,31 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           delete newKeys[provider];
           return { apiKeys: newKeys };
         });
-        
+
         // Also clear from provider if exists
         const existingProvider = get().getProviderByPlatform(provider);
         if (existingProvider) {
           get().updateProvider({ ...existingProvider, apiKey: '' });
         }
-        
+
         console.log(`[APIConfig] Cleared ${provider} API key`);
       },
 
       clearAllApiKeys: () => {
         // Clear legacy
         set({ apiKeys: {} });
-        
+
         // Clear all provider keys
         const { providers, updateProvider } = get();
         providers.forEach(p => {
           updateProvider({ ...p, apiKey: '' });
         });
-        
+
         console.log('[APIConfig] Cleared all API keys');
       },
 
       // ==================== Concurrency ====================
-      
+
       setConcurrency: (n) => {
         const value = Math.max(1, n); // 最小为1，无上限
         set({ concurrency: value });
@@ -962,7 +1066,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       },
 
       // ==================== Aspect ratio ====================
-      
+
       setAspectRatio: (ratio) => {
         set({
           aspectRatio: ratio,
@@ -978,7 +1082,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       },
 
       // ==================== Advanced Generation Options ====================
-      
+
       setAdvancedOption: (key, value) => {
         set((state) => ({
           advancedOptions: { ...state.advancedOptions, [key]: value },
@@ -1044,7 +1148,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       },
 
       // ==================== Validation ====================
-      
+
       isConfigured: (provider) => {
         // Check v2 providers first
         const prov = get().getProviderByPlatform(provider);
@@ -1094,7 +1198,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       },
 
       // ==================== Display helpers ====================
-      
+
       maskApiKey: (key) => {
         return maskKey(key);
       },
@@ -1130,13 +1234,14 @@ export const useAPIConfigStore = create<APIConfigStore>()(
     }),
     {
       name: 'opencut-api-config',  // localStorage key
-      version: 13,  // v13: clear stale metadata caches on upgrade + fix chained migration
+      storage: createJSONStorage(() => userScopedLocalStorage),
+      version: 16,  // v16: split built-in aggregator into auto-vip and add Chunfeng provider
       migrate: (persistedState: unknown, version: number) => {
         // Use mutable result object for chained migration
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const result = { ...(persistedState as any) } as Partial<APIConfigState> & { imageHostConfig?: LegacyImageHostConfig };
-        console.log(`[APIConfig] Chained migration: v${version} → v13`);
-        
+        console.log(`[APIConfig] Chained migration: v${version} → v16`);
+
         // Default feature bindings for migration
         const defaultBindings: FeatureBindings = {
           script_analysis: null,
@@ -1218,12 +1323,12 @@ export const useAPIConfigStore = create<APIConfigStore>()(
         };
 
         // ========== Chained migration: each step mutates `result` and falls through ==========
-        
+
         // v0/v1 → v2: Migrate apiKeys to providers
         if (version <= 1) {
           const oldApiKeys = result?.apiKeys || {};
           const providers: IProvider[] = [];
-          
+
           for (const template of DEFAULT_PROVIDERS) {
             const existingKey = oldApiKeys[template.platform as ProviderId] || '';
             providers.push({
@@ -1232,7 +1337,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
               apiKey: existingKey,
             });
           }
-          
+
           console.log(`[APIConfig] v0/v1→v2: Migrated ${providers.length} providers from apiKeys`);
           result.providers = providers;
           result.featureBindings = defaultBindings;
@@ -1267,7 +1372,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
         if (version <= 5) {
           const oldBindings = result.featureBindings || {};
           const newBindings: FeatureBindings = { ...defaultBindings };
-          
+
           for (const [key, value] of Object.entries(oldBindings)) {
             const feature = key as AIFeature;
             if (typeof value === 'string' && value) {
@@ -1279,7 +1384,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
               newBindings[feature] = null;
             }
           }
-          
+
           result.featureBindings = newBindings;
           console.log(`[APIConfig] v5→v6: Migrated featureBindings to multi-select format`);
           version = 6;
@@ -1296,7 +1401,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           if (removedCount > 0) {
             console.log(`[APIConfig] v6→v7: Removed ${removedCount} deprecated providers`);
           }
-          
+
           const oldBindings = result.featureBindings || {};
           const cleanedBindings: FeatureBindings = { ...defaultBindings };
           for (const [key, value] of Object.entries(oldBindings)) {
@@ -1310,7 +1415,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
               cleanedBindings[feature] = null;
             }
           }
-          
+
           result.providers = cleanedProviders;
           result.featureBindings = cleanedBindings;
           version = 7;
@@ -1328,7 +1433,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           const newBindings: FeatureBindings = { ...defaultBindings };
           let convertedCount = 0;
           let removedCount = 0;
-          
+
           for (const [key, value] of Object.entries(oldBindings)) {
             const feature = key as AIFeature;
             if (!Array.isArray(value)) {
@@ -1341,12 +1446,12 @@ export const useAPIConfigStore = create<APIConfigStore>()(
               if (idx <= 0) { converted.push(binding); continue; }
               const platformOrId = binding.slice(0, idx);
               const model = binding.slice(idx + 1);
-              
+
               if (providers.some(p => p.id === platformOrId)) {
                 converted.push(binding);
                 continue;
               }
-              
+
               const matches = providers.filter(p => p.platform === platformOrId);
               if (matches.length === 1) {
                 const newBinding = `${matches[0].id}:${model}`;
@@ -1362,11 +1467,11 @@ export const useAPIConfigStore = create<APIConfigStore>()(
             }
             newBindings[feature] = converted.length > 0 ? converted : null;
           }
-          
+
           if (convertedCount > 0 || removedCount > 0) {
             console.log(`[APIConfig] v8→v9: Converted ${convertedCount} bindings, removed ${removedCount} ambiguous`);
           }
-          
+
           result.featureBindings = newBindings;
           version = 9;
         }
@@ -1396,7 +1501,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           result.modelTags = {};
           result.modelEnableGroups = {};
           result.discoveredModelLimits = {};
-          
+
           // Backfill missing provider defaults without overwriting user-edited values.
           if (Array.isArray(result.providers)) {
             result.providers = result.providers.map((p: IProvider) => {
@@ -1415,16 +1520,108 @@ export const useAPIConfigStore = create<APIConfigStore>()(
               return p;
             });
           }
-          
+
           version = 13;
+        }
+
+        // v13 → v14: remove the old prefilled aggregator entry when it has no key.
+        // New installs start with an empty provider list.
+        if (version <= 13) {
+          const providers: IProvider[] = result.providers || [];
+          const removedIds = new Set(
+            providers
+              .filter((p) => p.platform === 'aggregator' && parseApiKeys(p.apiKey).length === 0)
+              .map((p) => p.id),
+          );
+
+          if (removedIds.size > 0) {
+            result.providers = providers.filter((p) => !removedIds.has(p.id));
+
+            const oldBindings = result.featureBindings || {};
+            const cleanedBindings: FeatureBindings = { ...defaultBindings };
+            for (const [key, value] of Object.entries(oldBindings)) {
+              const feature = key as AIFeature;
+              if (!Array.isArray(value)) {
+                cleanedBindings[feature] = null;
+                continue;
+              }
+              const filtered = value.filter((binding: string) => {
+                const idx = binding.indexOf(':');
+                if (idx <= 0) return true;
+                const ref = binding.slice(0, idx);
+                return ref !== 'aggregator' && !removedIds.has(ref);
+              });
+              cleanedBindings[feature] = filtered.length > 0 ? filtered : null;
+            }
+            result.featureBindings = cleanedBindings;
+          }
+
+          if (result.apiKeys) {
+            delete result.apiKeys.aggregator;
+          }
+
+          version = 14;
+        }
+
+        // v15 → v16: rename legacy aggregator provider to auto-vip.
+        // The old aggregator platform represented the built-in vip.auto-code.net flow.
+        if (version <= 15) {
+          const providers: IProvider[] = result.providers || [];
+          const legacyAggregatorIds = new Set(
+            providers
+              .filter((p) => p.platform === LEGACY_AGGREGATOR_PLATFORM)
+              .map((p) => p.id),
+          );
+
+          if (legacyAggregatorIds.size > 0) {
+            result.providers = providers.map((p) => migrateLegacyAggregatorProvider(p));
+
+            const oldBindings = result.featureBindings || {};
+            const migratedBindings: FeatureBindings = { ...defaultBindings };
+            for (const [key, value] of Object.entries(oldBindings)) {
+              const feature = key as AIFeature;
+              if (!Array.isArray(value)) {
+                migratedBindings[feature] = value ? [value as unknown as string] : null;
+                continue;
+              }
+              const mapped = value.map((binding: string) => {
+                const idx = binding.indexOf(':');
+                if (idx <= 0) return binding;
+                const ref = binding.slice(0, idx);
+                const model = binding.slice(idx + 1);
+                return ref === LEGACY_AGGREGATOR_PLATFORM ? `${AUTO_VIP_PLATFORM}:${model}` : binding;
+              });
+              migratedBindings[feature] = mapped.length > 0 ? mapped : null;
+            }
+            result.featureBindings = migratedBindings;
+            console.log(`[APIConfig] v15→v16: Migrated ${legacyAggregatorIds.size} legacy aggregator provider(s) to ${AUTO_VIP_PLATFORM}`);
+          }
+
+          if (result.apiKeys?.aggregator && Array.isArray(result.providers)) {
+            const autoVipProvider = result.providers.find((p) => p.platform === AUTO_VIP_PLATFORM);
+            if (autoVipProvider && parseApiKeys(autoVipProvider.apiKey).length === 0) {
+              autoVipProvider.apiKey = result.apiKeys.aggregator || '';
+              autoVipProvider.baseUrl = autoVipProvider.baseUrl || AUTO_VIP_BASE_URL;
+              autoVipProvider.name = autoVipProvider.name || AUTO_VIP_NAME;
+            }
+            delete result.apiKeys.aggregator;
+          }
+
+          version = 16;
         }
 
         // ========== Final normalization (always runs) ==========
 
+        if (Array.isArray(result.providers)) {
+          result.providers = result.providers.map((provider) => normalizeKnownProvider(provider) as IProvider);
+        }
+
         // Ensure all feature binding keys exist and normalize string → string[]
         const finalBindings: FeatureBindings = { ...defaultBindings };
+        const knownFeatureKeys = new Set(AI_FEATURES.map((feature) => feature.key));
         if (result.featureBindings) {
           for (const [key, value] of Object.entries(result.featureBindings)) {
+            if (!knownFeatureKeys.has(key as AIFeature)) continue;
             const feature = key as AIFeature;
             if (typeof value === 'string' && value) {
               finalBindings[feature] = [value];

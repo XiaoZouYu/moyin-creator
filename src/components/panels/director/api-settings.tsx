@@ -41,13 +41,13 @@ export function APISettings({ collapsed = true, onToggleCollapse }: APISettingsP
   } = useAPIConfigStore();
 
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({
-    memefast: false,
+    aggregator: false,
     runninghub: false,
   });
 
   const [testing, setTesting] = useState<ProviderId | null>(null);
   const [testResults, setTestResults] = useState<Record<string, boolean | null>>({
-    memefast: null,
+    aggregator: null,
     runninghub: null,
   });
 
@@ -77,8 +77,8 @@ export function APISettings({ collapsed = true, onToggleCollapse }: APISettingsP
     services: string[];
   }> = [
     {
-      id: "memefast",
-      name: "魔因API",
+      id: "aggregator",
+      name: "AI 中转 API",
       description: "全功能 AI 中转，支持对话/图片/视频/图片理解",
       services: ["对话", "图片", "视频", "图片理解"],
     },

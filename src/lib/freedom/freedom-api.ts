@@ -4,7 +4,7 @@
 
 /**
  * Freedom Panel API Client
- * Wraps moyin-creator's existing AI infrastructure for single-shot generation
+ * Wraps santi-creator's existing AI infrastructure for single-shot generation
  * Features: smart endpoint routing, retry with exponential backoff
  */
 
@@ -14,12 +14,17 @@ import {
   getFeatureNotConfiguredMessage,
   type FeatureConfig,
 } from '@/lib/ai/feature-router';
+import { submitGridImageRequest } from '@/lib/ai/image-generator';
 import { resolveImageApiFormat } from '@/lib/api-key-manager';
+import { isImage2ModelName, resolveProviderImageApiFormat } from '@/lib/ai/provider-platforms';
+import { corsFetch } from '@/lib/cors-fetch';
+import { readImageAsBase64 } from '@/lib/image-storage';
 import { uploadBase64Image } from '@/lib/utils/image-upload';
 import { isVeoModel, resolveVeoUploadCapability } from '@/lib/freedom/veo-capability';
 import { type AIFeature, useAPIConfigStore } from '@/stores/api-config-store';
 import { useMediaStore } from '@/stores/media-store';
 import { useProjectStore } from '@/stores/project-store';
+import { buildVolcVideoTaskUrls, isVolcArkVideoPlatform } from '@/lib/volc-ark-video';
 import { toast } from 'sonner';
 
 // ==================== Types ====================
@@ -27,12 +32,20 @@ import { toast } from 'sonner';
 export interface FreedomImageParams {
   prompt: string;
   model?: string;
+  size?: string;
   aspectRatio?: string;
   resolution?: string;
   width?: number;
   height?: number;
   negativePrompt?: string;
+  referenceImages?: FreedomImageReference[];
   extraParams?: Record<string, any>;
+}
+
+export interface FreedomImageReference {
+  url: string;
+  purpose: string;
+  name?: string;
 }
 
 export type FreedomVideoUploadRole = 'single' | 'first' | 'last' | 'reference';
@@ -62,13 +75,18 @@ export interface GenerationResult {
 // ==================== Constants ====================
 
 const IMAGE_POLL_INTERVAL = 2000;
-const IMAGE_POLL_MAX_ATTEMPTS = 60;
+const IMAGE_POLL_MAX_ATTEMPTS = 300; // 10 minutes at 2s intervals
 const VIDEO_POLL_INTERVAL = 2000;
 const VIDEO_POLL_MAX_ATTEMPTS = 120;
 
 // Retry config
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY = 3000;
+
+type FreedomKeyManager = {
+  getCurrentKey: () => string | null;
+  handleError: (status: number, errorText?: string) => boolean;
+};
 
 // ==================== Retry Logic ====================
 
@@ -184,10 +202,25 @@ function resolveFreedomFeatureConfig(
   return { config: null, source: feature };
 }
 
-type FreedomImageRoute = 'midjourney' | 'ideogram' | 'kling_image' | 'openai_chat' | 'openai_images' | 'replicate';
+type FreedomImageRoute = 'midjourney' | 'ideogram' | 'kling_image' | 'openai_chat' | 'openai_responses_image' | 'openai_images' | 'replicate';
 
-function detectFreedomImageRoute(model: string, endpointTypes?: string[]): FreedomImageRoute {
+type FreedomImageReferenceMode = 'midjourney_base64' | 'openai_multimodal' | 'generic_image_urls' | 'none';
+
+interface ResolvedFreedomImageReference extends FreedomImageReference {
+  inputUrl: string;
+}
+
+function isFreedomGptImageModel(model: string): boolean {
   const lower = model.toLowerCase();
+  return isImage2ModelName(model) || /^gpt-image(?:$|[-_.])/.test(lower) || lower.includes('chatgpt-image');
+}
+
+function detectFreedomImageRoute(
+  model: string,
+  endpointTypes?: string[],
+  platform?: string,
+  baseUrl?: string,
+): FreedomImageRoute {
   const hasEndpoint = (re: RegExp) => (endpointTypes || []).some((t) => re.test(t));
   const hasExactEndpoint = (name: string) => (endpointTypes || []).includes(name);
 
@@ -207,16 +240,78 @@ function detectFreedomImageRoute(model: string, endpointTypes?: string[]): Freed
     return 'replicate';
   }
 
-  const baseRoute = resolveImageApiFormat(endpointTypes, model);
+  const baseRoute = resolveProviderImageApiFormat({
+    platform,
+    model,
+    apiFormat: resolveImageApiFormat(endpointTypes, model),
+  });
+  if (baseRoute === 'openai_responses_image') return 'openai_responses_image';
   return baseRoute === 'openai_chat' ? 'openai_chat' : 'openai_images';
 }
 
-type FreedomVideoRoute = 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate';
+function getFreedomImageReferenceMode(
+  route: FreedomImageRoute,
+  model: string,
+  endpointTypes?: string[],
+): FreedomImageReferenceMode {
+  if (route === 'midjourney') return 'midjourney_base64';
+  if (route === 'openai_chat' || route === 'openai_responses_image') return 'openai_multimodal';
+  if (route === 'openai_images') {
+    if (isFreedomGptImageModel(model)) return 'generic_image_urls';
+    const supportsGenericRefs = (endpointTypes || []).some((type) => /vidu生图|aigc-image|参考|reference|图生图|image.?to.?image|i2i|edit/i.test(type));
+    return supportsGenericRefs ? 'generic_image_urls' : 'none';
+  }
+  if (route === 'kling_image' && (model === 'kling-omni-image' || (endpointTypes || []).includes('omni-image'))) {
+    return 'generic_image_urls';
+  }
+  return 'none';
+}
+
+function getReferenceUnsupportedError(params: FreedomImageParams, mode: FreedomImageReferenceMode): string | undefined {
+  if (!params.referenceImages || params.referenceImages.length === 0 || mode !== 'none') return undefined;
+  return '当前生图模型不支持产品参考图，请在设置中选择支持参考图的生图模型';
+}
+
+async function resolveFreedomImageReferences(
+  referenceImages?: FreedomImageReference[],
+  options: { preferHttpUrl?: boolean; forceDataUrl?: boolean } = {},
+): Promise<ResolvedFreedomImageReference[]> {
+  const refs = referenceImages || [];
+  const resolved: ResolvedFreedomImageReference[] = [];
+
+  for (const ref of refs) {
+    if (!ref.url) continue;
+
+    let inputUrl = ref.url;
+    if (options.forceDataUrl && !ref.url.startsWith('data:image/')) {
+      inputUrl = await readImageAsBase64(ref.url) || ref.url;
+    } else if (!/^https?:\/\//i.test(ref.url) && !ref.url.startsWith('data:image/')) {
+      inputUrl = await readImageAsBase64(ref.url) || ref.url;
+    }
+
+    if (options.preferHttpUrl && !/^https?:\/\//i.test(inputUrl)) {
+      const dataUrl = inputUrl.startsWith('data:image/') ? inputUrl : await readImageAsBase64(inputUrl);
+      if (dataUrl) {
+        try {
+          inputUrl = await uploadBase64Image(dataUrl);
+        } catch (error) {
+          console.warn('[Freedom] Failed to upload reference image, falling back to original input:', error);
+        }
+      }
+    }
+
+    resolved.push({ ...ref, inputUrl });
+  }
+
+  return resolved;
+}
+
+type FreedomVideoRoute = 'openai_official' | 'unified' | 'volc' | 'volc_ark' | 'wan' | 'kling' | 'replicate';
 
 const FREEDOM_VIDEO_ROUTE_MAP: Record<string, FreedomVideoRoute> = {
   'openAI官方视频格式': 'openai_official',
   'openAI视频格式': 'openai_official',
-  '豆包视频异步': 'volc',  // doubao-seedance uses /volc/v1/contents/generations/tasks
+  '豆包视频异步': 'volc',  // OpenAI 兼容中转的 doubao-seedance 路由；火山方舟官方平台按 platform 单独分流
   '异步': 'wan',
   '文生视频': 'kling',
   '图生视频': 'kling',
@@ -236,7 +331,7 @@ const FREEDOM_VIDEO_ROUTE_MAP: Record<string, FreedomVideoRoute> = {
   'luma视频扩展': 'unified',
   'runway图生视频': 'unified',
   'aigc-video': 'unified',
-  'wan视频生成': 'unified',  // wan2.6 models use memefast /v1/video/generations
+  'wan视频生成': 'unified',  // wan2.6 models use aggregator /v1/video/generations
   // Vidu endpoint types (all route to unified /v1/video/generations)
   'vidu文生视频': 'unified',
   'vidu图生视频': 'unified',
@@ -292,7 +387,9 @@ function getUnifiedEndpointPaths(endpointTypes: string[]): { submit: string; pol
   return DEFAULT_UNIFIED_ENDPOINT;
 }
 
-function detectFreedomVideoRoute(model: string, endpointTypes?: string[]): FreedomVideoRoute {
+function detectFreedomVideoRoute(model: string, endpointTypes?: string[], platform?: string): FreedomVideoRoute {
+  if (isVolcArkVideoPlatform(platform)) return 'volc_ark';
+
   if (endpointTypes && endpointTypes.length > 0) {
     // 优先级：官方 Sora -> Kling -> Volc -> Wan -> Replicate -> Unified
     for (const t of endpointTypes) {
@@ -350,35 +447,51 @@ async function _generateFreedomImageInner(
   // 每次重试动态取当前 key（利用 keyManager rotate 后的新 key）
   const apiKey = config.keyManager?.getCurrentKey?.() || config.apiKey;
   // 模型 ID 直接透传：UI 选的就是供应商原始 ID，无需转换
-  const model = params.model || defaultModel;
+  const model = (params.model || defaultModel || '').trim();
+  if (!model) {
+    const message = '自由板块图片生成未选择模型：请在设置的服务映射中为「自由板块-图片」或「图片生成」选择具体模型';
+    toast.error(message);
+    throw new Error(message);
+  }
   const normalizedBase = baseUrl.replace(/\/+$/, '');
 
   // ── Smart Routing: choose endpoint based on model metadata ──
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
-  const route = detectFreedomImageRoute(model, endpointTypes);
-
+  const route = detectFreedomImageRoute(model, endpointTypes, config.platform, normalizedBase);
+  const referenceMode = getFreedomImageReferenceMode(route, model, endpointTypes);
+  const referenceError = getReferenceUnsupportedError(params, referenceMode);
+  if (referenceError) {
+    toast.error(referenceError);
+    throw new Error(referenceError);
+  }
   console.log('[Freedom] Generating image:', {
     model,
     route,
     endpointTypes,
+    referenceMode,
+    referenceCount: params.referenceImages?.length || 0,
     prompt: params.prompt.slice(0, 50),
   });
+
   if (route === 'midjourney') {
-    return await generateViaMidjourneyEndpoint(params, model, apiKey, normalizedBase);
+    return generateViaMidjourneyEndpoint(params, model, apiKey, normalizedBase);
   }
   if (route === 'ideogram') {
-    return await generateViaIdeogramEndpoint(params, model, apiKey, normalizedBase);
+    return generateViaIdeogramEndpoint(params, model, apiKey, normalizedBase);
+  }
+  if (route === 'openai_responses_image') {
+    return generateViaResponsesImage(params, model, apiKey, normalizedBase, config.keyManager, config.platform);
   }
   if (route === 'openai_chat') {
-    return await generateViaChatCompletions(params, model, apiKey, normalizedBase);
+    return generateViaChatCompletions(params, model, apiKey, normalizedBase);
   }
   if (route === 'kling_image') {
-    return await generateViaKlingImagesEndpoint(params, model, apiKey, normalizedBase);
+    return generateViaKlingImagesEndpoint(params, model, apiKey, normalizedBase);
   }
   if (route === 'replicate') {
-    return await generateViaReplicateImageEndpoint(params, model, apiKey, normalizedBase);
+    return generateViaReplicateImageEndpoint(params, model, apiKey, normalizedBase);
   }
-  return await generateViaImagesEndpoint(params, model, apiKey, normalizedBase, endpointTypes);
+  return generateViaImagesEndpoint(params, model, apiKey, normalizedBase, endpointTypes, config.keyManager);
 }
 
 /**
@@ -392,10 +505,24 @@ async function generateViaChatCompletions(
 ): Promise<GenerationResult> {
   const endpoint = buildEndpoint(baseUrl, 'chat/completions');
   const aspectRatio = params.aspectRatio || '1:1';
+  const referenceImages = await resolveFreedomImageReferences(params.referenceImages);
 
-  const userContent: Array<{ type: string; text?: string }> = [
+  const userContent: Array<{ type: string; text?: string; image_url?: { url: string; detail?: 'high' | 'auto' } }> = [
     { type: 'text', text: `Generate an image with aspect ratio ${aspectRatio}: ${params.prompt}` },
   ];
+  for (const [index, ref] of referenceImages.entries()) {
+    userContent.push({
+      type: 'text',
+      text: `Reference image ${index + 1}: purpose=${ref.purpose}${ref.name ? `, name=${ref.name}` : ''}. Preserve product identity from this image.`,
+    });
+    userContent.push({
+      type: 'image_url',
+      image_url: {
+        url: ref.inputUrl,
+        detail: ref.purpose === 'usage_scene' ? 'auto' : 'high',
+      },
+    });
+  }
 
   const requestBody = {
     model,
@@ -403,9 +530,9 @@ async function generateViaChatCompletions(
     max_tokens: 4096,
   };
 
-  console.log('[Freedom] Submitting via chat completions:', { model, endpoint });
+  console.log('[Freedom] Submitting via chat completions:', { model, endpoint, referenceCount: referenceImages.length });
 
-  const response = await fetch(endpoint, {
+  const response = await corsFetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -430,6 +557,42 @@ async function generateViaChatCompletions(
 
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
   return { url: imageUrl, mediaId };
+}
+
+/**
+ * Generate IMAGE2 / gpt-image-2 via Responses API + image_generation tool.
+ */
+async function generateViaResponsesImage(
+  params: FreedomImageParams,
+  model: string,
+  apiKey: string,
+  baseUrl: string,
+  keyManager?: FreedomKeyManager,
+  providerPlatform?: string,
+): Promise<GenerationResult> {
+  const referenceImages = await resolveFreedomImageReferences(params.referenceImages);
+  const result = await submitGridImageRequest({
+    model,
+    prompt: params.prompt,
+    apiKey,
+    baseUrl,
+    providerPlatform,
+    aspectRatio: params.aspectRatio || '1:1',
+    resolution: params.resolution,
+    referenceImages: referenceImages.map((ref) => ref.inputUrl),
+    extraParams: {
+      ...params.extraParams,
+      ...(params.size ? { size: params.size } : {}),
+    },
+    keyManager,
+  });
+
+  if (!result.imageUrl) {
+    throw new Error('Responses 图片生成完成但未返回图片结果');
+  }
+
+  const mediaId = saveToMediaLibrary(result.imageUrl, params.prompt, 'ai-image');
+  return { url: result.imageUrl, taskId: result.taskId, mediaId };
 }
 
 /**
@@ -476,7 +639,35 @@ async function generateViaImagesEndpoint(
   apiKey: string,
   baseUrl: string,
   endpointTypes?: string[],
+  keyManager?: FreedomKeyManager,
 ): Promise<GenerationResult> {
+  if (isFreedomGptImageModel(model)) {
+    const referenceImages = await resolveFreedomImageReferences(params.referenceImages, { forceDataUrl: true });
+    const baseRequest = {
+      model,
+      prompt: params.prompt,
+      apiKey,
+      baseUrl,
+      aspectRatio: params.aspectRatio || '1:1',
+      resolution: params.resolution,
+      extraParams: {
+        ...params.extraParams,
+        ...(params.size ? { size: params.size } : {}),
+      },
+      keyManager,
+    };
+    const result = await submitGridImageRequest({
+      ...baseRequest,
+      referenceImages: referenceImages.map((ref) => ref.inputUrl),
+    });
+    if (!result.imageUrl) {
+      throw new Error('官方图片 API 响应未包含图片结果');
+    }
+    const mediaId = saveToMediaLibrary(result.imageUrl, params.prompt, 'ai-image');
+    return { url: result.imageUrl, taskId: result.taskId, mediaId };
+  }
+
+  const referenceImages = await resolveFreedomImageReferences(params.referenceImages, { preferHttpUrl: true });
   const body: Record<string, any> = {
     prompt: params.prompt,
     model,
@@ -487,6 +678,9 @@ async function generateViaImagesEndpoint(
   if (params.width) body.width = params.width;
   if (params.height) body.height = params.height;
   if (params.negativePrompt) body.negative_prompt = params.negativePrompt;
+  if (referenceImages.length > 0) {
+    body.image_urls = referenceImages.map((ref) => ref.inputUrl);
+  }
   if (params.extraParams) {
     Object.assign(body, params.extraParams);
   }
@@ -494,7 +688,7 @@ async function generateViaImagesEndpoint(
   const imagePaths = getImageEndpointPaths(endpointTypes || []);
   const rootBase = getRootBaseUrl(baseUrl);
   const submitUrl = `${rootBase}${imagePaths.submit}`;
-  const response = await fetch(submitUrl, {
+  const response = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -534,7 +728,7 @@ async function generateViaImagesEndpoint(
 
 /**
  * Resolve kling model name for API requests.
- * Composite IDs like 'kling-image-v1-5' → 'kling-v1-5' (MemeFast version ID).
+ * Composite IDs like 'kling-image-v1-5' → 'kling-v1-5' (OpenAI 兼容中转 version ID).
  * Video version IDs (kling-v2-6) pass through unchanged.
  */
 function resolveKlingModelName(model: string): string {
@@ -553,6 +747,7 @@ async function generateViaKlingImagesEndpoint(
   baseUrl: string,
 ): Promise<GenerationResult> {
   const rootBase = getRootBaseUrl(baseUrl);
+  const referenceImages = await resolveFreedomImageReferences(params.referenceImages, { preferHttpUrl: true });
   const nativePath = model === 'kling-omni-image'
     ? 'kling/v1/images/omni-image'
     : 'kling/v1/images/generations';
@@ -560,11 +755,14 @@ async function generateViaKlingImagesEndpoint(
   const body: Record<string, any> = { prompt: params.prompt, model: resolveKlingModelName(model) };
   if (params.aspectRatio) body.aspect_ratio = params.aspectRatio;
   if (params.negativePrompt) body.negative_prompt = params.negativePrompt;
+  if (referenceImages.length > 0) {
+    body.image_urls = referenceImages.map((ref) => ref.inputUrl);
+  }
   if (params.extraParams) Object.assign(body, params.extraParams);
 
   let response: Response;
   try {
-    response = await fetch(`${rootBase}/${nativePath}`, {
+    response = await corsFetch(`${rootBase}/${nativePath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify(body),
@@ -597,10 +795,83 @@ async function generateViaKlingImagesEndpoint(
   return { url: imageUrl, taskId: data.task_id, mediaId };
 }
 
+function formatHttpErrorMessage(prefix: string, status: number, body: string): string {
+  try {
+    const data = JSON.parse(body);
+    const code = data.error?.code || data.code;
+    const message = data.error?.message || data.message || body;
+    const normalized = `${code || ''} ${message || ''}`.toLowerCase();
+
+    if (code === 'AccountOverdueError' || normalized.includes('overdue balance')) {
+      return `火山方舟账号欠费或余额不足（${status}${code ? ` ${code}` : ''}），请到火山方舟控制台充值或结清欠款后重试。`;
+    }
+    if (code === 'AuthenticationError' || status === 401) {
+      return `API Key 无效或未授权（${status}${code ? ` ${code}` : ''}）：${message}`;
+    }
+    return `${prefix}: ${status}${code ? ` ${code}` : ''} ${message}`;
+  } catch {
+    return `${prefix}: ${status} ${body}`;
+  }
+}
+
 function toHttpError(prefix: string, status: number, body: string): Error & { status: number } {
-  const err = new Error(`${prefix}: ${status} ${body}`) as Error & { status: number };
+  const err = new Error(formatHttpErrorMessage(prefix, status, body)) as Error & { status: number };
   err.status = status;
   return err;
+}
+
+function previewJson(value: unknown, maxLength = 240): string {
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+  } catch {
+    return String(value);
+  }
+}
+
+function normalizeVideoUrl(value: unknown): string | undefined {
+  if (!value) return undefined;
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return normalizeVideoUrl(value[0]);
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return normalizeVideoUrl(record.url || record.video_url || record.output_url);
+  }
+  return undefined;
+}
+
+function getVolcTaskStatus(data: any): string {
+  return String(
+    data.status ||
+    data.state ||
+    data.task_status ||
+    data.data?.status ||
+    data.data?.task_status ||
+    data.output?.status ||
+    data.output?.task_status ||
+    data.result?.status ||
+    data.result?.task_status ||
+    '',
+  ).toLowerCase();
+}
+
+function getVolcTaskErrorMessage(data: any): string {
+  const candidates = [
+    data.error?.message,
+    data.error?.code,
+    data.error,
+    data.message,
+    data.data?.error?.message,
+    data.data?.error,
+    data.output?.message,
+    data.output?.error,
+    data.result?.message,
+    data.result?.error,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+  }
+  return 'Volc 视频生成失败';
 }
 
 function buildMidjourneyPrompt(params: FreedomImageParams): string {
@@ -640,6 +911,7 @@ async function generateViaMidjourneyEndpoint(
   const rootBase = getRootBaseUrl(baseUrl);
   const submitUrl = `${rootBase}/mj/submit/imagine`;
   const extra = params.extraParams || {};
+  const referenceImages = await resolveFreedomImageReferences(params.referenceImages, { forceDataUrl: true });
   const requestBody: Record<string, any> = {
     prompt: buildMidjourneyPrompt(params),
   };
@@ -647,11 +919,17 @@ async function generateViaMidjourneyEndpoint(
   if (modes) requestBody.accountFilter = { modes };
   if (/niji/i.test(model)) requestBody.botType = 'NIJI_JOURNEY';
   // 垫图：base64Array（图片引导，格式 data:image/png;base64,xxx）
-  if (Array.isArray(extra.base64Array) && extra.base64Array.length > 0) {
-    requestBody.base64Array = extra.base64Array;
+  const base64Array = [
+    ...(Array.isArray(extra.base64Array) ? extra.base64Array : []),
+    ...referenceImages
+      .map((ref) => ref.inputUrl)
+      .filter((url) => url.startsWith('data:image/')),
+  ];
+  if (base64Array.length > 0) {
+    requestBody.base64Array = base64Array;
   }
 
-  const submitResp = await fetch(submitUrl, {
+  const submitResp = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -674,7 +952,7 @@ async function generateViaMidjourneyEndpoint(
   const pollUrl = `${rootBase}/mj/task/${taskId}/fetch`;
   for (let i = 0; i < IMAGE_POLL_MAX_ATTEMPTS; i++) {
     await new Promise((r) => setTimeout(r, 2500));
-    const pollResp = await fetch(pollUrl, {
+    const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     });
     if (!pollResp.ok) continue;
@@ -755,7 +1033,7 @@ async function generateViaIdeogramEndpoint(
   }
   if (typeof extra.num_images === 'number') form.append('num_images', String(extra.num_images));
 
-  const response = await fetch(endpoint, {
+  const response = await corsFetch(endpoint, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -796,7 +1074,7 @@ async function generateViaReplicateImageEndpoint(
   if (params.negativePrompt) input.negative_prompt = params.negativePrompt;
   if (params.extraParams) Object.assign(input, params.extraParams);
 
-  const submitResp = await fetch(submitUrl, {
+  const submitResp = await corsFetch(submitUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
     body: JSON.stringify({ model, input }),
@@ -818,7 +1096,7 @@ async function generateViaReplicateImageEndpoint(
   const pollUrl = `${rootBase}/replicate/v1/predictions/${predictionId}`;
   for (let i = 0; i < IMAGE_POLL_MAX_ATTEMPTS; i++) {
     await new Promise(r => setTimeout(r, IMAGE_POLL_INTERVAL));
-    const pollResp = await fetch(pollUrl, {
+    const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     });
     if (!pollResp.ok) continue;
@@ -868,7 +1146,7 @@ async function _generateFreedomVideoInner(
   const model = params.model || defaultModel;
 
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
-  const route = detectFreedomVideoRoute(model, endpointTypes);
+  const route = detectFreedomVideoRoute(model, endpointTypes, config.platform);
   console.log('[Freedom] Generating video:', {
     model,
     route,
@@ -882,7 +1160,10 @@ async function _generateFreedomVideoInner(
       result = await generateVideoViaOpenAIOfficial(params, model, apiKey, baseUrl);
       break;
     case 'volc':
-      result = await generateVideoViaVolc(params, model, apiKey, baseUrl);
+      result = await generateVideoViaVolc(params, model, apiKey, baseUrl, false);
+      break;
+    case 'volc_ark':
+      result = await generateVideoViaVolc(params, model, apiKey, baseUrl, true);
       break;
     case 'wan':
       result = await generateVideoViaWan(params, model, apiKey, baseUrl);
@@ -1017,7 +1298,16 @@ function validateVeoVideoUploads(
 
 async function toUploadHttpUrl(file: FreedomVideoUploadFile): Promise<string> {
   if (/^https?:\/\//i.test(file.dataUrl)) return file.dataUrl;
-  return uploadBase64Image(file.dataUrl);
+  try {
+    return await uploadBase64Image(file.dataUrl);
+  } catch (error) {
+    console.error('[Freedom] Video reference image upload failed', {
+      role: file.role,
+      fileName: file.fileName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 }
 
 function dataUrlToBlob(dataUrl: string, mimeHint?: string): Blob {
@@ -1122,7 +1412,7 @@ async function generateVideoViaOpenAIOfficial(
     await appendVeoMultipartReferences(form, model, endpointTypes, params.uploadFiles);
   }
 
-  const submitResp = await fetch(endpoint, {
+  const submitResp = await corsFetch(endpoint, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}` },
     body: form,
@@ -1140,7 +1430,7 @@ async function generateVideoViaOpenAIOfficial(
   const pollUrl = buildEndpoint(baseUrl, `videos/${taskId}`);
   for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await fetch(pollUrl, {
+    const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     });
     if (!pollResp.ok) continue;
@@ -1230,7 +1520,7 @@ async function generateVideoViaUnified(
   const rootBase = getRootBaseUrl(baseUrl);
   const submitUrl = `${rootBase}${endpointPaths.submit}`;
 
-  const resp = await fetch(submitUrl, {
+  const resp = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1265,7 +1555,7 @@ async function generateVideoViaUnified(
 
   for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await fetch(pollUrl, {
+    const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     });
     if (!pollResp.ok) continue;
@@ -1288,18 +1578,22 @@ async function generateVideoViaVolc(
   model: string,
   apiKey: string,
   baseUrl: string,
+  officialArk: boolean,
 ): Promise<GenerationResult> {
-  const rootBase = getRootBaseUrl(baseUrl);
+  const taskUrls = buildVolcVideoTaskUrls(baseUrl, officialArk);
   const promptParts = [params.prompt];
-  if (params.resolution) promptParts.push(`--rs ${params.resolution.toLowerCase()}`);
-  if (params.aspectRatio) promptParts.push(`--rt ${params.aspectRatio}`);
-  if (params.duration) promptParts.push(`--dur ${params.duration}`);
+  if (!officialArk) {
+    if (params.resolution) promptParts.push(`--rs ${params.resolution.toLowerCase()}`);
+    if (params.aspectRatio) promptParts.push(`--rt ${params.aspectRatio}`);
+    if (params.duration) promptParts.push(`--dur ${params.duration}`);
+  }
 
   const content: Array<Record<string, unknown>> = [
     { type: 'text', text: promptParts.join(' ') },
   ];
 
-  // 附加上传图片（首帧/尾帧），对齐 Director 面板的 callVolcVideoApi
+  // 附加上传图片：首帧 / 可选尾帧 / 产品参考图。
+  // Seedance 2.0 总图片上限按 9 张控制，调用方可进一步限制输入数量。
   const grouped = groupVideoUploadFiles(params.uploadFiles);
   const primaryFile = grouped.single || grouped.first;
   if (primaryFile) {
@@ -1310,10 +1604,34 @@ async function generateVideoViaVolc(
     const url = await toUploadHttpUrl(grouped.last);
     content.push({ type: 'image_url', image_url: { url }, role: 'last_frame' });
   }
+  const remainingImageSlots = Math.max(0, 9 - content.filter((item) => item.type === 'image_url').length);
+  for (const reference of grouped.references.slice(0, remainingImageSlots)) {
+    const url = await toUploadHttpUrl(reference);
+    content.push({ type: 'image_url', image_url: { url }, role: 'reference_image' });
+  }
 
-  const body = { model, content };
+  const body = officialArk
+    ? {
+        model,
+        content,
+        ...(params.duration ? { duration: params.duration } : {}),
+        generate_audio: false,
+        ...(params.aspectRatio ? { ratio: params.aspectRatio } : {}),
+      }
+    : { model, content };
 
-  const submitResp = await fetch(`${rootBase}/volc/v1/contents/generations/tasks`, {
+  console.log(`[Freedom] Volc video route → POST ${taskUrls.routeLabel}`, {
+    model,
+    officialArk,
+    duration: params.duration,
+    ratio: params.aspectRatio,
+    imageCount: content.filter((item) => item.type === 'image_url').length,
+    imageRoles: content
+      .filter((item) => item.type === 'image_url')
+      .map((item) => item.role),
+  });
+
+  const submitResp = await corsFetch(taskUrls.submit, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1326,29 +1644,91 @@ async function generateVideoViaVolc(
   }
 
   const submitData = await submitResp.json();
-  const taskId = submitData.id;
+  const taskId = submitData.id || submitData.task_id || submitData.data?.id || submitData.data?.task_id;
   if (!taskId) throw new Error('Volc 返回空任务 ID');
 
-  const pollUrl = `${rootBase}/volc/v1/contents/generations/tasks/${taskId}`;
+  const pollUrl = taskUrls.poll(String(taskId));
+  let lastPollDetail = '';
+  let lastTaskStatus = '';
   for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
+    const attempt = i + 1;
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await fetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-    });
-    if (!pollResp.ok) continue;
-    const pollData = await pollResp.json();
-    const status = String(pollData.status || '').toLowerCase();
+
+    let pollResp: Response;
+    try {
+      pollResp = await corsFetch(pollUrl, {
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
+    } catch (error) {
+      lastPollDetail = `第 ${attempt}/${VIDEO_POLL_MAX_ATTEMPTS} 次查询网络错误：${error instanceof Error ? error.message : String(error)}`;
+      console.warn('[Freedom] Volc video poll request failed', {
+        taskId,
+        attempt,
+        maxAttempts: VIDEO_POLL_MAX_ATTEMPTS,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+
+    if (!pollResp.ok) {
+      const text = await pollResp.text().catch(() => '');
+      lastPollDetail = `第 ${attempt}/${VIDEO_POLL_MAX_ATTEMPTS} 次查询 HTTP ${pollResp.status}${text ? `：${previewJson(text)}` : ''}`;
+      console.warn('[Freedom] Volc video poll HTTP failed', {
+        taskId,
+        attempt,
+        maxAttempts: VIDEO_POLL_MAX_ATTEMPTS,
+        status: pollResp.status,
+        body: previewJson(text),
+      });
+      continue;
+    }
+
+    let pollData: any;
+    try {
+      pollData = await pollResp.json();
+    } catch (error) {
+      lastPollDetail = `第 ${attempt}/${VIDEO_POLL_MAX_ATTEMPTS} 次查询响应 JSON 解析失败：${error instanceof Error ? error.message : String(error)}`;
+      console.warn('[Freedom] Volc video poll JSON parse failed', {
+        taskId,
+        attempt,
+        maxAttempts: VIDEO_POLL_MAX_ATTEMPTS,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+
+    const status = getVolcTaskStatus(pollData);
+    lastTaskStatus = status || 'unknown';
+    if (attempt === 1 || attempt % 10 === 0) {
+      console.log('[Freedom] Volc video poll status', {
+        taskId,
+        attempt,
+        maxAttempts: VIDEO_POLL_MAX_ATTEMPTS,
+        status: lastTaskStatus,
+      });
+    }
+
     if (status === 'succeeded' || status === 'completed' || status === 'success') {
-      const videoUrl = pollData.content?.video_url || extractVideoUrl(pollData);
-      if (!videoUrl) throw new Error('Volc 成功但无视频 URL');
+      const videoUrl =
+        normalizeVideoUrl(pollData.content?.video_url) ||
+        normalizeVideoUrl(pollData.content) ||
+        normalizeVideoUrl(pollData.outputs) ||
+        normalizeVideoUrl(pollData.output?.video_url) ||
+        normalizeVideoUrl(pollData.output?.url) ||
+        normalizeVideoUrl(pollData.data?.video_url) ||
+        normalizeVideoUrl(pollData.data?.output) ||
+        normalizeVideoUrl(extractVideoUrl(pollData));
+      if (!videoUrl) throw new Error(`Volc 成功但无视频 URL：${previewJson(pollData)}`);
       return { url: videoUrl, taskId: String(taskId) };
     }
     if (status === 'failed' || status === 'expired' || status === 'cancelled' || status === 'error') {
-      throw new Error(pollData.error?.message || pollData.error || 'Volc 视频生成失败');
+      throw new Error(getVolcTaskErrorMessage(pollData));
     }
   }
 
-  throw new Error('Volc 视频生成超时');
+  const waitedSeconds = Math.round((VIDEO_POLL_INTERVAL * VIDEO_POLL_MAX_ATTEMPTS) / 1000);
+  const lastDetail = lastPollDetail || (lastTaskStatus ? `最后业务状态：${lastTaskStatus}` : '未获取到有效查询状态');
+  throw new Error(`Volc 视频生成超时（已等待约 ${waitedSeconds}s，taskId: ${taskId}；${lastDetail}）`);
 }
 
 async function generateVideoViaWan(
@@ -1369,7 +1749,7 @@ async function generateVideoViaWan(
   };
   if (params.duration) body.parameters.duration = Math.max(3, params.duration);
 
-  const submitResp = await fetch(
+  const submitResp = await corsFetch(
     `${rootBase}/alibailian/api/v1/services/aigc/video-generation/video-synthesis`,
     {
       method: 'POST',
@@ -1391,7 +1771,7 @@ async function generateVideoViaWan(
   const pollUrl = `${rootBase}/alibailian/api/v1/tasks/${taskId}`;
   for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await fetch(pollUrl, {
+    const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     });
     if (!pollResp.ok) continue;
@@ -1461,7 +1841,7 @@ async function generateVideoViaKling(
   }
 
   const submitUrl = `${rootBase}/kling/v1/videos/${endpointPath}`;
-  const submitResp = await fetch(submitUrl, {
+  const submitResp = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1481,7 +1861,7 @@ async function generateVideoViaKling(
   const pollUrl = `${rootBase}/kling/v1/videos/${endpointPath}/${taskId}`;
   for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await fetch(pollUrl, {
+    const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     });
     if (!pollResp.ok) continue;
@@ -1528,7 +1908,7 @@ async function generateVideoViaReplicate(
   if (primaryFile) input.image = await toUploadHttpUrl(primaryFile);
   if (grouped.last) input.tail_image = await toUploadHttpUrl(grouped.last);
 
-  const submitResp = await fetch(submitUrl, {
+  const submitResp = await corsFetch(submitUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
     body: JSON.stringify({ model, input }),
@@ -1547,7 +1927,7 @@ async function generateVideoViaReplicate(
   const pollUrl = `${rootBase}/replicate/v1/predictions/${predictionId}`;
   for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
     await new Promise(r => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await fetch(pollUrl, {
+    const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     });
     if (!pollResp.ok) continue;
@@ -1610,7 +1990,7 @@ async function pollForResult(
     await new Promise(resolve => setTimeout(resolve, interval));
 
     try {
-      const response = await fetch(pollUrl, {
+      const response = await corsFetch(pollUrl, {
         headers: { 'Authorization': `Bearer ${apiKey}` },
       });
 

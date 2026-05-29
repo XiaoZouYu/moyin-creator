@@ -2,7 +2,7 @@
 
 ## 双重许可模式 | Dual Licensing
 
-**魔因漫创 (Moyin Creator)** 采用双重许可模式发布：
+**三体漫创 (Santi Creator)** 采用双重许可模式发布：
 
 ### 1. 社区版 — AGPL-3.0
 
@@ -40,7 +40,7 @@
 如需商业许可或有任何疑问，请通过以下方式联系：
 
 - 📧 Email: [memecalculate@gmail.com](mailto:memecalculate@gmail.com)
-- 🐙 GitHub: [https://github.com/hotflow2024/moyin-creator/issues](https://github.com/hotflow2024/moyin-creator/issues)
+- 🐙 GitHub: [https://github.com/hotflow2024/santi-creator/issues](https://github.com/hotflow2024/santi-creator/issues)
 
 ---
 

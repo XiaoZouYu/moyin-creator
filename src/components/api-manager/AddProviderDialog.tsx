@@ -28,11 +28,26 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import type { IProvider } from "@/lib/api-key-manager";
+import type { IProvider, ModelCapability } from "@/lib/api-key-manager";
+import {
+  AUTO_VIP_BASE_URL,
+  AUTO_VIP_NAME,
+  AUTO_VIP_PLATFORM,
+  CHUNFENG_BASE_URL,
+  CHUNFENG_NAME,
+  CHUNFENG_PLATFORM,
+} from "@/lib/ai/provider-platforms";
+import {
+  VOLC_ARK_SEEDANCE_DISPLAY_NAME,
+  VOLC_ARK_SEEDANCE_MODEL_ID,
+  VOLC_ARK_VIDEO_BASE_URL,
+  VOLC_ARK_VIDEO_NAME,
+  VOLC_ARK_VIDEO_PLATFORM,
+} from "@/lib/volc-ark-video";
 
 /**
  * 平台预设配置
- * 1. 魔因API (memefast) - 全功能中转（推荐）
+ * 1. 春风 / auto-vip - 内置 OpenAI 兼容中转
  * 2. RunningHub - 视角切换/多角度生成
  * 3. 自定义 - OpenAI 兼容 API
  */
@@ -44,27 +59,48 @@ const PLATFORM_PRESETS: Array<{
   services: string[];
   models: string[];
   recommended?: boolean;
+  capabilities?: ModelCapability[];
+  allowMultiple?: boolean;
+  hideBaseUrl?: boolean;
+  hideName?: boolean;
+  hideModel?: boolean;
+  modelLabel?: string;
 }> = [
   {
-    platform: "memefast",
-    name: "魔因API",
-    baseUrl: "https://memefast.top",
-    description: "543+ 模型中转，支持 GPT/Claude/Gemini/DeepSeek/Veo/Sora 等",
-    services: ["对话", "图片生成", "视频生成", "图片理解"],
-    models: [
-      "deepseek-v3.2",
-      "glm-4.7",
-      "gemini-3-pro-preview",
-      "gemini-3-pro-image-preview",
-      "gpt-image-1.5",
-      "doubao-seedance-1-5-pro-251215",
-      "veo3.1",
-      "sora-2-all",
-      "wan2.6-i2v",
-      "grok-video-3-10s",
-      "claude-haiku-4-5-20251001",
-    ],
+    platform: CHUNFENG_PLATFORM,
+    name: CHUNFENG_NAME,
+    baseUrl: CHUNFENG_BASE_URL,
+    description: "春风 OpenAI 官方兼容中转，只需填写 API Key",
+    services: ["对话", "图片生成", "图片理解"],
+    models: [],
     recommended: true,
+    allowMultiple: true,
+    hideBaseUrl: true,
+    hideModel: true,
+  },
+  {
+    platform: AUTO_VIP_PLATFORM,
+    name: AUTO_VIP_NAME,
+    baseUrl: AUTO_VIP_BASE_URL,
+    description: "auto-vip 中转，使用项目内置的生图/对话流程",
+    services: ["对话", "图片生成", "视频生成", "图片理解"],
+    models: [],
+    allowMultiple: true,
+    hideBaseUrl: true,
+    hideModel: true,
+  },
+  {
+    platform: VOLC_ARK_VIDEO_PLATFORM,
+    name: VOLC_ARK_VIDEO_NAME,
+    baseUrl: VOLC_ARK_VIDEO_BASE_URL,
+    description: "火山方舟官方 Seedance 视频生成直连，不走 AI 中转",
+    services: ["视频生成"],
+    models: [VOLC_ARK_SEEDANCE_MODEL_ID],
+    recommended: true,
+    capabilities: ["video_generation"],
+    allowMultiple: true,
+    hideBaseUrl: true,
+    modelLabel: VOLC_ARK_SEEDANCE_DISPLAY_NAME,
   },
   {
     platform: "runninghub",
@@ -106,6 +142,9 @@ export function AddProviderDialog({
   // Get selected preset
   const selectedPreset = PLATFORM_PRESETS.find((p) => p.platform === platform);
   const isCustom = platform === "custom";
+  const hideBaseUrl = !!selectedPreset?.hideBaseUrl;
+  const hideName = !!selectedPreset?.hideName;
+  const hideModel = !!selectedPreset?.hideModel;
 
   // Reset form when dialog opens
   useEffect(() => {
@@ -120,14 +159,17 @@ export function AddProviderDialog({
 
   // Auto-fill when platform changes
   useEffect(() => {
-    if (selectedPreset && !isCustom) {
-      setName(selectedPreset.name);
-      setBaseUrl(selectedPreset.baseUrl);
-      // 自动填充默认模型
-      if (selectedPreset.models && selectedPreset.models.length > 0) {
-        setModel(selectedPreset.models[0]);
-      }
+    if (!selectedPreset) return;
+    if (isCustom) {
+      setName("");
+      setBaseUrl("");
+      setModel("");
+      return;
     }
+
+    setName(selectedPreset.name);
+    setBaseUrl(selectedPreset.baseUrl);
+    setModel(selectedPreset.models?.[0] || "");
   }, [platform, selectedPreset, isCustom]);
 
   const handleSubmit = () => {
@@ -135,7 +177,7 @@ export function AddProviderDialog({
       toast.error("请选择平台");
       return;
     }
-    if (!name.trim()) {
+    if (!hideName && !name.trim()) {
       toast.error("请输入名称");
       return;
     }
@@ -150,27 +192,29 @@ export function AddProviderDialog({
 
     // 保存该平台的所有预设模型，确保 provider.model 不为空
     const presetModels = selectedPreset?.models || [];
-    const modelArray = presetModels.length > 0 
-      ? presetModels 
-      : (model ? [model] : []);
+    const typedModels = model
+      .split(/[,\n]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const modelArray = typedModels.length > 0 ? typedModels : presetModels;
     
     onSubmit({
       platform,
-      name: name.trim(),
-      baseUrl: baseUrl.trim(),
+      name: (name || selectedPreset?.name || platform).trim(),
+      baseUrl: ((hideBaseUrl ? selectedPreset?.baseUrl : baseUrl) || "").trim(),
       apiKey: apiKey.trim(),
       model: modelArray,
+      capabilities: selectedPreset?.capabilities,
     });
 
     onOpenChange(false);
-    toast.success(isMemefastAppend ? `已追加 Key 到 ${name}` : `已添加 ${name}`);
+    toast.success(`已添加 ${(name || selectedPreset?.name || platform).trim()}`);
   };
 
-  // Filter out already existing platforms (except custom and memefast which allow repeat add)
+  // Filter out already existing platforms except repeatable presets.
   const availablePlatforms = PLATFORM_PRESETS.filter(
-    (p) => p.platform === "custom" || p.platform === "memefast" || !existingPlatforms.includes(p.platform)
+    (p) => p.platform === "custom" || p.allowMultiple || !existingPlatforms.includes(p.platform)
   );
-  const isMemefastAppend = platform === "memefast" && existingPlatforms.includes("memefast");
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -206,17 +250,19 @@ export function AddProviderDialog({
           </div>
 
           {/* Name */}
-          <div className="space-y-2">
-            <Label>名称</Label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="供应商名称"
-            />
-          </div>
+          {!hideName && (
+            <div className="space-y-2">
+              <Label>名称</Label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="供应商名称"
+              />
+            </div>
+          )}
 
           {/* Base URL (only for custom or editable) */}
-          {(isCustom || platform) && (
+          {(isCustom || platform) && !hideBaseUrl && (
             <div className="space-y-2">
               <Label>Base URL {!isCustom && "(可选修改)"}</Label>
               <Input
@@ -243,21 +289,23 @@ export function AddProviderDialog({
           </div>
 
           {/* Model - optional input */}
-          <div className="space-y-2">
-            <Label>模型 (可选)</Label>
-            <Input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder="输入模型名称，如 gpt-4o"
-            />
-          </div>
+          {!hideModel && (
+            <div className="space-y-2">
+              <Label>{selectedPreset?.modelLabel ? `模型（${selectedPreset.modelLabel}）` : "模型 (可选)"}</Label>
+              <Input
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={selectedPreset?.modelLabel ? "输入火山方舟模型 ID 或推理接入点名称" : "输入模型名称，如 gpt-4o"}
+              />
+            </div>
+          )}
         </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button onClick={handleSubmit}>{isMemefastAppend ? "追加 Key" : "添加"}</Button>
+          <Button onClick={handleSubmit}>添加</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

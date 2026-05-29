@@ -9,8 +9,9 @@
  * The local-image:// protocol is handled by Electron's custom protocol handler
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { useResolvedImageUrl } from "@/hooks/use-resolved-image-url";
 
 interface LocalImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
   src: string;
@@ -18,24 +19,20 @@ interface LocalImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
 }
 
 export function LocalImage({ src, fallback, className, alt, ...props }: LocalImageProps) {
-  const [error, setError] = useState(false);
-  const [currentSrc, setCurrentSrc] = useState(src);
+  const [useFallback, setUseFallback] = useState(false);
+  const resolvedSrc = useResolvedImageUrl(src);
+  const resolvedFallback = useResolvedImageUrl(fallback);
+  const currentSrc = useFallback ? resolvedFallback : resolvedSrc;
+
+  useEffect(() => {
+    setUseFallback(false);
+  }, [src]);
 
   const handleError = () => {
-    if (!error && fallback) {
-      setError(true);
-      setCurrentSrc(fallback);
-    } else {
-      setError(true);
-    }
+    setUseFallback(true);
   };
 
-  // Reset error state when src changes
-  if (src !== currentSrc && !error) {
-    setCurrentSrc(src);
-  }
-
-  if (error && !fallback) {
+  if ((useFallback && !fallback) || !currentSrc) {
     return (
       <div 
         className={cn(

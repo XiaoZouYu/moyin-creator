@@ -7,6 +7,7 @@
  */
 
 import { retryOperation } from '@/lib/utils/retry';
+import { corsFetch } from '@/lib/cors-fetch';
 import type { HorizontalDirection, ElevationAngle, ShotSize } from './runninghub-angles';
 import { generateAnglePrompt } from './runninghub-angles';
 
@@ -69,7 +70,7 @@ export async function submitAngleSwitchTask(
 
   try {
     const data = await retryOperation(async () => {
-      const response = await fetch(`${normalizeBaseUrl(baseUrl)}/run/ai-app/${appId}`, {
+      const response = await corsFetch(`${normalizeBaseUrl(baseUrl)}/run/ai-app/${appId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -137,7 +138,7 @@ export async function queryTaskStatus(
     if (!baseUrl) {
       throw new Error('RunningHub Base URL 未配置');
     }
-    const response = await fetch(`${normalizeBaseUrl(baseUrl)}/query`, {
+    const response = await corsFetch(`${normalizeBaseUrl(baseUrl)}/query`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

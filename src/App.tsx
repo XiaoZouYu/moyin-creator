@@ -3,27 +3,30 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { useEffect, useState } from "react";
 import { Layout } from "@/components/Layout";
+import { UserPhoneGate } from "@/components/UserPhoneGate";
 import { Toaster } from "@/components/ui/sonner";
-import { UpdateDialog } from "@/components/UpdateDialog";
 import { useThemeStore } from "@/stores/theme-store";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { useAppSettingsStore } from "@/stores/app-settings-store";
 import { parseApiKeys } from "@/lib/api-key-manager";
+import { isPricingMetadataProviderPlatform } from "@/lib/ai/provider-platforms";
 import { Loader2 } from "lucide-react";
 import { migrateToProjectStorage, recoverFromLegacy } from "@/lib/storage-migration";
-import type { AvailableUpdateInfo } from "@/types/update";
-
-let hasTriggeredStartupUpdateCheck = false;
+import { getCurrentPhone } from "@/lib/user-session";
 
 function App() {
   const { theme } = useThemeStore();
-  const { updateSettings, setUpdateSettings } = useAppSettingsStore();
-  const [isMigrating, setIsMigrating] = useState(true);
-  const [startupUpdate, setStartupUpdate] = useState<AvailableUpdateInfo | null>(null);
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const hasPhone = !!getCurrentPhone();
+  const [isMigrating, setIsMigrating] = useState(() => hasPhone);
 
   // 启动时运行存储迁移 + 数据恢复
   useEffect(() => {
+    if (!hasPhone) {
+      setIsMigrating(false);
+      return;
+    }
+
+    setIsMigrating(true);
     (async () => {
       try {
         await useAppSettingsStore.persist.rehydrate();
@@ -35,18 +38,18 @@ function App() {
         setIsMigrating(false);
       }
     })();
-  }, []);
+  }, [hasPhone]);
 
   // 启动时自动同步所有已配置 API Key 的供应商模型元数据
   useEffect(() => {
-    if (isMigrating) return;
+    if (!hasPhone || isMigrating) return;
     let cancelled = false;
 
     const runStartupSync = async () => {
       const { providers, syncProviderModels } = useAPIConfigStore.getState();
       const configuredProviders = providers
         .filter((p) => parseApiKeys(p.apiKey).length > 0)
-        .sort((a, b) => Number(b.platform === 'memefast') - Number(a.platform === 'memefast'));
+        .sort((a, b) => Number(isPricingMetadataProviderPlatform(b.platform)) - Number(isPricingMetadataProviderPlatform(a.platform)));
 
       for (const p of configuredProviders) {
         if (cancelled) return;
@@ -71,7 +74,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [isMigrating]);
+  }, [hasPhone, isMigrating]);
 
   // 同步主题到 html 元素
   useEffect(() => {
@@ -80,42 +83,16 @@ function App() {
     root.classList.add(theme);
   }, [theme]);
 
-  useEffect(() => {
-    if (
-      isMigrating ||
-      hasTriggeredStartupUpdateCheck ||
-      !updateSettings.autoCheckEnabled ||
-      !window.appUpdater
-    ) {
-      return;
-    }
-
-    hasTriggeredStartupUpdateCheck = true;
-    let cancelled = false;
-
-    (async () => {
-      const result = await window.appUpdater?.checkForUpdates();
-      if (
-        cancelled ||
-        !result ||
-        !result.success ||
-        !result.hasUpdate ||
-        !result.update ||
-        result.update.latestVersion === updateSettings.ignoredVersion
-      ) {
-        return;
-      }
-
-      setStartupUpdate(result.update);
-      setUpdateDialogOpen(true);
-    })().catch((error) => {
-      console.warn("[App] Auto update check failed:", error);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isMigrating, updateSettings.autoCheckEnabled, updateSettings.ignoredVersion]);
+  if (!hasPhone) {
+    return (
+      <>
+        <UserPhoneGate>
+          <Layout />
+        </UserPhoneGate>
+        <Toaster richColors position="top-center" />
+      </>
+    );
+  }
 
   // 迁移中显示加载界面
   if (isMigrating) {
@@ -132,15 +109,6 @@ function App() {
   return (
     <div className="h-screen w-screen overflow-hidden">
       <Layout />
-      <UpdateDialog
-        open={updateDialogOpen}
-        onOpenChange={setUpdateDialogOpen}
-        updateInfo={startupUpdate}
-        onIgnoreVersion={(version) => {
-          setUpdateSettings({ ignoredVersion: version });
-          setStartupUpdate(null);
-        }}
-      />
       <Toaster richColors position="top-center" />
     </div>
   );

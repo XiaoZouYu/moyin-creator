@@ -1,7 +1,7 @@
 // Copyright (c) 2025 hotflow2024
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
-import { mainNavItems, bottomNavItems, Tab, useMediaPanelStore } from "@/stores/media-panel-store";
+import { mainNavItems, bottomNavItems, useMediaPanelStore } from "@/stores/media-panel-store";
 import { useThemeStore } from "@/stores/theme-store";
 import { cn } from "@/lib/utils";
 import {
@@ -22,7 +22,7 @@ export function TabBar() {
       <div className="flex flex-col w-14 bg-panel border-r border-border py-2">
         <div className="p-2">
           <div className="w-8 h-8 bg-primary text-primary-foreground flex items-center justify-center mx-auto rounded">
-            <span className="text-sm font-bold">M</span>
+            <span className="text-sm font-bold">三</span>
           </div>
         </div>
         {/* Dashboard nav */}
@@ -52,15 +52,13 @@ export function TabBar() {
           <TooltipProvider delayDuration={300}>
             <Tooltip>
               <TooltipTrigger asChild>
-                <a
-                  href="https://github.com/MemeCalculate/moyin-creator/blob/main/docs/WORKFLOW_GUIDE.md"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
                   className="w-full flex flex-col items-center py-2 text-muted-foreground hover:text-foreground transition-colors"
                 >
                   <HelpCircle className="h-4 w-4" />
                   <span className="text-[8px]">帮助</span>
-                </a>
+                </button>
               </TooltipTrigger>
               <TooltipContent side="right">使用帮助</TooltipContent>
             </Tooltip>
@@ -110,7 +108,7 @@ export function TabBar() {
       {/* Logo + Back */}
       <div className="p-2 border-b border-border">
         <div className="w-8 h-8 bg-primary text-primary-foreground flex items-center justify-center mx-auto rounded mb-1">
-          <span className="text-sm font-bold">M</span>
+          <span className="text-sm font-bold">三</span>
         </div>
         <TooltipProvider delayDuration={300}>
           <Tooltip>
@@ -164,15 +162,13 @@ export function TabBar() {
         <TooltipProvider delayDuration={300}>
           <Tooltip>
             <TooltipTrigger asChild>
-              <a
-                href="https://github.com/MemeCalculate/moyin-creator/blob/main/docs/WORKFLOW_GUIDE.md"
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                type="button"
                 className="w-full flex flex-col items-center py-2 text-muted-foreground hover:text-foreground transition-colors"
               >
                 <HelpCircle className="h-4 w-4" />
                 <span className="text-[8px]">帮助</span>
-              </a>
+              </button>
             </TooltipTrigger>
             <TooltipContent side="right">使用帮助</TooltipContent>
           </Tooltip>

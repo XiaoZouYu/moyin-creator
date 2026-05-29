@@ -3,7 +3,8 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
+import { userScopedLocalStorage } from '@/lib/user-session';
 
 // ==================== Types ====================
 
@@ -200,7 +201,8 @@ export const useFreedomStore = create<FreedomStore>()(
       },
     }),
     {
-      name: 'moyin-freedom',
+      name: 'santi-freedom',
+      storage: createJSONStorage(() => userScopedLocalStorage),
       version: 1,
     }
   )

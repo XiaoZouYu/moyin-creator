@@ -17,7 +17,7 @@ declare global {
       saveImage: (url: string, category: string, filename: string) => Promise<{ success: boolean; localPath?: string; error?: string }>;
       getImagePath: (localPath: string) => Promise<string | null>;
       deleteImage: (localPath: string) => Promise<boolean>;
-      readAsBase64: (localPath: string) => Promise<string | null>;
+      readAsBase64: (localPath: string) => Promise<{ success: boolean; base64?: string; mimeType?: string; size?: number; error?: string }>;
       getAbsolutePath: (localPath: string) => Promise<string | null>;
     };
     fileStorage?: {
@@ -49,6 +49,30 @@ declare global {
         defaultPath: string;
         filters: { name: string; extensions: string[] }[];
       }) => Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }>;
+      apiFetch: (options: {
+        url: string;
+        method?: string;
+        headers?: Record<string, string>;
+        body?: string;
+        bodyBase64?: string;
+        formData?: Array<{
+          name: string;
+          value?: string;
+          fileName?: string;
+          mimeType?: string;
+          dataBase64?: string;
+        }>;
+        timeoutMs?: number;
+        responseType?: 'text' | 'base64';
+      }) => Promise<{
+        ok: boolean;
+        status: number;
+        statusText: string;
+        headers: Record<string, string>;
+        body: string;
+        bodyBase64?: string;
+        error?: string;
+      }>;
     };
     appUpdater?: {
       getCurrentVersion: () => Promise<string>;

@@ -1,14 +1,14 @@
 // Copyright (c) 2025 hotflow2024
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
-import { app, BrowserWindow, ipcMain, protocol, net, dialog, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, protocol, dialog, shell, net } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import https from 'node:https'
 import http from 'node:http'
 import os from 'node:os'
-import packageMetadata from '../package.json'
-import type { AvailableUpdateInfo, OpenExternalResult, UpdateCheckResult, UpdateManifest } from '../src/types/update'
+import { spawn } from 'node:child_process'
+import type { OpenExternalResult, UpdateCheckResult } from '../src/types/update'
 
 // electron-vite 构建后的目录结构
 //
@@ -30,19 +30,6 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 
 let win: BrowserWindow | null
 
-type PackageUpdateConfig = {
-  manifestUrl?: string
-  defaultGithubUrl?: string
-  defaultBaiduUrl?: string
-  defaultBaiduCode?: string
-}
-
-type PackageMetadata = {
-  updateConfig?: PackageUpdateConfig
-}
-
-const packageUpdateConfig = (packageMetadata as PackageMetadata).updateConfig ?? {}
-
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
@@ -60,106 +47,9 @@ function sanitizeExternalUrl(value?: string) {
   }
 }
 
-function normalizeVersionParts(version: string) {
-  return version
-    .replace(/^v/i, '')
-    .split('.')
-    .map((part) => {
-      const match = part.match(/\d+/)
-      return match ? Number(match[0]) : 0
-    })
-}
-
-function compareVersions(left: string, right: string) {
-  const leftParts = normalizeVersionParts(left)
-  const rightParts = normalizeVersionParts(right)
-  const maxLength = Math.max(leftParts.length, rightParts.length)
-
-  for (let index = 0; index < maxLength; index += 1) {
-    const leftPart = leftParts[index] ?? 0
-    const rightPart = rightParts[index] ?? 0
-    if (leftPart > rightPart) return 1
-    if (leftPart < rightPart) return -1
-  }
-
-  return 0
-}
-
-function getUpdateManifestUrl() {
-  return sanitizeExternalUrl(packageUpdateConfig.manifestUrl)
-}
-
-function getDefaultGithubUrl() {
-  return sanitizeExternalUrl(packageUpdateConfig.defaultGithubUrl)
-}
-
-function getDefaultBaiduUrl() {
-  return sanitizeExternalUrl(packageUpdateConfig.defaultBaiduUrl)
-}
-
-function getDefaultBaiduCode() {
-  return isNonEmptyString(packageUpdateConfig.defaultBaiduCode)
-    ? packageUpdateConfig.defaultBaiduCode.trim()
-    : undefined
-}
-
-async function fetchUpdateManifest() {
-  const manifestUrl = getUpdateManifestUrl()
-  if (!manifestUrl) {
-    throw new Error('未配置版本清单地址')
-  }
-
-  const requestUrl = new URL(manifestUrl)
-  requestUrl.searchParams.set('_ts', Date.now().toString())
-
-  const response = await net.fetch(requestUrl.toString())
-  if (!response.ok) {
-    throw new Error(`版本清单请求失败 (${response.status})`)
-  }
-
-  const rawManifest = await response.json() as Partial<UpdateManifest>
-  if (!isNonEmptyString(rawManifest.version)) {
-    throw new Error('版本清单缺少有效的 version 字段')
-  }
-
-  return {
-    version: rawManifest.version.trim(),
-    releaseNotes: isNonEmptyString(rawManifest.releaseNotes)
-      ? rawManifest.releaseNotes.trim()
-      : isNonEmptyString(rawManifest.notes)
-        ? rawManifest.notes.trim()
-        : undefined,
-    publishedAt: isNonEmptyString(rawManifest.publishedAt)
-      ? rawManifest.publishedAt.trim()
-      : undefined,
-    githubUrl: sanitizeExternalUrl(rawManifest.githubUrl) ?? getDefaultGithubUrl(),
-    baiduUrl: sanitizeExternalUrl(rawManifest.baiduUrl) ?? getDefaultBaiduUrl(),
-    baiduCode: isNonEmptyString(rawManifest.baiduCode)
-      ? rawManifest.baiduCode.trim()
-      : getDefaultBaiduCode(),
-  } satisfies UpdateManifest
-}
-
-async function resolveAvailableUpdate(currentVersion: string): Promise<AvailableUpdateInfo | null> {
-  const manifest = await fetchUpdateManifest()
-  if (compareVersions(manifest.version, currentVersion) <= 0) {
-    return null
-  }
-
-  return {
-    currentVersion,
-    latestVersion: manifest.version,
-    releaseNotes: manifest.releaseNotes,
-    publishedAt: manifest.publishedAt,
-    githubUrl: manifest.githubUrl,
-    baiduUrl: manifest.baiduUrl,
-    baiduCode: manifest.baiduCode,
-  }
-}
-
 function createWindow() {
   win = new BrowserWindow({
-    title: '魔因漫创',
+    title: '三体漫创',
     width: 1400,
     height: 900,
     minWidth: 1200,
@@ -280,7 +170,7 @@ function isSubdirectory(parentPath: string, childPath: string): boolean {
 function pathsConflict(source: string, dest: string): string | null {
   const normalizedSource = path.resolve(source).toLowerCase()
   const normalizedDest = path.resolve(dest).toLowerCase()
-  
+
   if (normalizedSource === normalizedDest) {
     return null // Same path is OK, handled elsewhere
   }
@@ -424,6 +314,19 @@ const getImagesDir = (subDir: string) => {
   return imagesDir
 }
 
+const getImageExtensionFromMime = (mimeType: string): string | null => {
+  const mimeTypes: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/jpg': '.jpg',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'image/bmp': '.bmp',
+    'image/avif': '.avif',
+  }
+  return mimeTypes[mimeType.toLowerCase()] || null
+}
+
 // Download image from URL and save to local file
 const downloadImage = (url: string, filePath: string, maxRedirects: number = 5): Promise<void> => {
   return new Promise((resolve, reject) => {
@@ -433,7 +336,7 @@ const downloadImage = (url: string, filePath: string, maxRedirects: number = 5):
     }
     const protocol = url.startsWith('https') ? https : http
     const file = fs.createWriteStream(filePath)
-    
+
     protocol.get(url, (response) => {
       const status = response.statusCode ?? 0
       if ([301, 302, 303, 307, 308].includes(status)) {
@@ -444,14 +347,14 @@ const downloadImage = (url: string, filePath: string, maxRedirects: number = 5):
           return
         }
       }
-      
+
       if (status !== 200) {
         file.close()
         fs.unlink(filePath, () => {})
         reject(new Error(`Failed to download: ${status}`))
         return
       }
-      
+
       response.pipe(file)
       file.on('finish', () => {
         file.close()
@@ -501,8 +404,761 @@ type ImageHostUploadResponse = {
   error?: string
 }
 
+type ApiFetchRequest = {
+  url: string
+  method?: string
+  headers?: Record<string, string>
+  body?: string
+  bodyBase64?: string
+  formData?: Array<{
+    name: string
+    value?: string
+    fileName?: string
+    mimeType?: string
+    dataBase64?: string
+  }>
+  timeoutMs?: number
+  responseType?: 'text' | 'base64'
+}
+
+type ApiFetchResponse = {
+  ok: boolean
+  status: number
+  statusText: string
+  headers: Record<string, string>
+  body: string
+  bodyBase64?: string
+  error?: string
+}
+
+function summarizeImage2Sse(text: string) {
+  const eventTypes: string[] = []
+  const outputItems: Array<{ event: string; itemType: string; status?: string; hasResult: boolean }> = []
+  let hasPartial = false
+  let hasOutputItemResult = false
+  let hasCompletedResult = false
+  let completedOutputCount = 0
+  let outputTextPreview = ''
+  let outputTextChars = 0
+
+  const trimmedText = text.trim()
+  if (trimmedText.startsWith('{')) {
+    try {
+      const data = JSON.parse(trimmedText)
+      const output = data.response?.output || data.output
+      if (Array.isArray(output)) {
+        completedOutputCount = output.length
+        hasCompletedResult = output.some((item) => item?.type === 'image_generation_call' && !!item?.result)
+        hasOutputItemResult = hasCompletedResult
+        for (const item of output.slice(0, 12)) {
+          outputItems.push({
+            event: 'json',
+            itemType: String(item?.type || 'unknown'),
+            status: item?.status ? String(item.status) : undefined,
+            hasResult: !!item?.result,
+          })
+        }
+      }
+      const textValue = data.output_text || data.response?.output_text
+      if (typeof textValue === 'string') {
+        outputTextChars = textValue.length
+        outputTextPreview = textValue.slice(0, 300)
+      }
+      return {
+        bodyChars: text.length,
+        eventTypes: ['json'],
+        hasPartial,
+        hasOutputItemResult,
+        hasCompletedResult,
+        completedOutputCount,
+        outputItems,
+        outputTextChars,
+        outputTextPreview: outputTextPreview.trim(),
+      }
+    } catch {
+      // Fall through to SSE parsing.
+    }
+  }
+
+  for (const block of text.split(/\r?\n\r?\n/)) {
+    let eventName = 'message'
+    const dataLines: string[] = []
+    for (const line of block.split(/\r?\n/)) {
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim() || eventName
+        continue
+      }
+      if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart())
+      }
+    }
+    if (dataLines.length === 0) continue
+
+    const raw = dataLines.join('\n').trim()
+    if (!raw || raw === '[DONE]') continue
+
+    try {
+      const event = JSON.parse(raw)
+      const type = typeof event.type === 'string' ? event.type : eventName
+      eventTypes.push(type)
+      if (type === 'response.image_generation_call.partial_image' || event.partial_image_b64) {
+        hasPartial = true
+      }
+      if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
+        outputTextChars += event.delta.length
+        if (outputTextPreview.length < 300) {
+          outputTextPreview += event.delta
+        }
+      }
+      if (event.item?.type && outputItems.length < 12) {
+        outputItems.push({
+          event: type,
+          itemType: String(event.item.type),
+          status: event.item.status ? String(event.item.status) : undefined,
+          hasResult: !!event.item.result,
+        })
+      }
+      if (type === 'response.output_item.done' && event.item?.type === 'image_generation_call' && event.item?.result) {
+        hasOutputItemResult = true
+      }
+      const output = event.response?.output || event.output
+      if ((type === 'response.completed' || type === 'response.done') && Array.isArray(output)) {
+        completedOutputCount = output.length
+        hasCompletedResult = output.some((item) => item?.type === 'image_generation_call' && !!item?.result)
+        for (const item of output) {
+          if (item?.type && outputItems.length < 12) {
+            outputItems.push({
+              event: type,
+              itemType: String(item.type),
+              status: item.status ? String(item.status) : undefined,
+              hasResult: !!item.result,
+            })
+          }
+        }
+      }
+    } catch {
+      eventTypes.push('non-json')
+    }
+  }
+
+  return {
+    bodyChars: text.length,
+    eventTypes,
+    hasPartial,
+    hasOutputItemResult,
+    hasCompletedResult,
+    completedOutputCount,
+    outputItems,
+    outputTextChars,
+    outputTextPreview: outputTextPreview.trim(),
+  }
+}
+
+function summarizeImage2RequestBody(body?: string) {
+  if (!body) return {}
+  try {
+    const parsed = JSON.parse(body)
+    const firstInput = Array.isArray(parsed.input) ? parsed.input[0] : undefined
+    const content = Array.isArray(firstInput?.content) ? firstInput.content : []
+    const firstTool = Array.isArray(parsed.tools) ? parsed.tools[0] : undefined
+    return {
+      model: parsed.model,
+      stream: parsed.stream,
+      store: parsed.store,
+      toolChoice: parsed.tool_choice,
+      toolModel: firstTool?.model,
+      size: firstTool?.size,
+      quality: firstTool?.quality,
+      outputFormat: firstTool?.output_format,
+      inputTextCount: content.filter((item: any) => item?.type === 'input_text').length,
+      inputImageCount: content.filter((item: any) => item?.type === 'input_image').length,
+    }
+  } catch {
+    return { bodyParseError: true }
+  }
+}
+
 function isHttpUrl(value: string) {
   return value.startsWith('http://') || value.startsWith('https://')
+}
+
+function normalizeApiFetchUrl(value: string) {
+  const parsed = new URL(value)
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Only http/https API requests are allowed')
+  }
+  return parsed.toString()
+}
+
+function removeContentTypeHeader(headers: Record<string, string>) {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === 'content-type') {
+      delete headers[key]
+    }
+  }
+}
+
+function buildApiFetchBody(request: ApiFetchRequest, headers: Record<string, string>): BodyInit | undefined {
+  if (request.formData && request.formData.length > 0) {
+    const form = new FormData()
+    for (const field of request.formData) {
+      if (!field.name) continue
+      if (field.dataBase64 !== undefined) {
+        const bytes = Buffer.from(field.dataBase64, 'base64')
+        const blob = new Blob([bytes], { type: field.mimeType || 'application/octet-stream' })
+        form.append(field.name, blob, field.fileName || 'upload.bin')
+      } else {
+        form.append(field.name, field.value || '')
+      }
+    }
+    removeContentTypeHeader(headers)
+    return form
+  }
+
+  if (request.bodyBase64 !== undefined) {
+    return Buffer.from(request.bodyBase64, 'base64')
+  }
+
+  return request.body
+}
+
+type BinaryFetchResult = {
+  ok: boolean
+  status: number
+  statusText: string
+  headers: Record<string, string>
+  bodyBase64: string
+}
+
+function normalizeResponseHeaders(headers: http.IncomingHttpHeaders): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value === 'string') {
+      result[key] = value
+    } else if (Array.isArray(value)) {
+      result[key] = value.join(', ')
+    }
+  }
+  return result
+}
+
+function normalizeRequestHeaders(headers?: HeadersInit): Record<string, string> {
+  const result: Record<string, string> = {}
+  if (!headers) return result
+
+  if (headers instanceof Headers) {
+    headers.forEach((value, key) => {
+      result[key] = value
+    })
+    return result
+  }
+
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      result[key] = value
+    }
+    return result
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (value !== undefined) result[key] = String(value)
+  }
+  return result
+}
+
+function hasHeader(headers: Record<string, string>, name: string) {
+  const normalized = name.toLowerCase()
+  return Object.keys(headers).some((key) => key.toLowerCase() === normalized)
+}
+
+function bodyInitToBuffer(body: BodyInit | null | undefined): Buffer | undefined {
+  if (body === undefined || body === null) return undefined
+  if (typeof body === 'string') return Buffer.from(body, 'utf8')
+  if (Buffer.isBuffer(body)) return body
+  if (body instanceof ArrayBuffer) return Buffer.from(body)
+  if (ArrayBuffer.isView(body)) {
+    return Buffer.from(body.buffer, body.byteOffset, body.byteLength)
+  }
+  throw new Error('node:http transport only supports string or binary request bodies')
+}
+
+function responseFromNodeText(
+  body: Buffer,
+  status: number,
+  statusText: string,
+  headers: Record<string, string>,
+) {
+  return new Response(body.toString('utf8'), {
+    status,
+    statusText,
+    headers,
+  })
+}
+
+type NodeCliFetchResult = {
+  ok: boolean
+  status: number
+  statusText: string
+  headers: Record<string, string>
+  bodyBase64: string
+}
+
+const NODE_CLI_FETCH_SCRIPT = String.raw`
+const fs = require('node:fs');
+
+function normalizeHeaders(headers) {
+  const result = {};
+  if (!headers) return result;
+  if (typeof headers.forEach === 'function') {
+    headers.forEach((value, key) => {
+      result[key] = value;
+    });
+    return result;
+  }
+  for (const [key, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) result[key] = value.join(', ');
+    else if (value !== undefined) result[key] = String(value);
+  }
+  return result;
+}
+
+let payload;
+try {
+  payload = JSON.parse(fs.readFileSync(0, 'utf8'));
+} catch (error) {
+  console.error(JSON.stringify({ error: 'Invalid stdin payload', detail: error && error.message }));
+  process.exit(2);
+}
+
+const body = payload.bodyBase64 ? Buffer.from(payload.bodyBase64, 'base64') : undefined;
+const headers = { ...(payload.headers || {}) };
+if (body && !Object.keys(headers).some((key) => key.toLowerCase() === 'content-length')) {
+  headers['Content-Length'] = String(body.length);
+}
+
+function getErrorMessage(error) {
+  if (!error) return 'unknown error';
+  if (error.cause && error.cause.message && error.cause.message !== error.message) {
+    return error.message + '; cause: ' + error.cause.message;
+  }
+  return error.message || String(error);
+}
+
+function getErrorCode(error) {
+  return error && (error.code || (error.cause && error.cause.code));
+}
+
+function shouldRetry(error) {
+  const message = getErrorMessage(error).toLowerCase();
+  const code = String(getErrorCode(error) || '').toLowerCase();
+  return (
+    code === 'econnreset' ||
+    code === 'etimedout' ||
+    code === 'eai_again' ||
+    message.includes('socket hang up') ||
+    message.includes('other side closed') ||
+    message.includes('fetch failed') ||
+    message.includes('connection closed') ||
+    message.includes('timeout')
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchOnce() {
+  if (typeof fetch !== 'function') {
+    throw new Error('Node global fetch is not available');
+  }
+
+  const timeoutMs = payload.timeoutMs || 600000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new Error('request timeout'));
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(payload.url, {
+      method: payload.method || 'GET',
+      headers,
+      body: body && !['GET', 'HEAD'].includes(String(payload.method || 'GET').toUpperCase()) ? body : undefined,
+      signal: controller.signal,
+    });
+    const buffer = Buffer.from(await response.arrayBuffer());
+    process.stdout.write(JSON.stringify({
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText || '',
+      headers: normalizeHeaders(response.headers),
+      bodyBase64: buffer.toString('base64'),
+    }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+(async () => {
+  const retryCount = Number.isFinite(Number(payload.retryCount)) ? Number(payload.retryCount) : 2;
+  let lastError;
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    try {
+      await fetchOnce();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retryCount || !shouldRetry(error)) break;
+      await sleep(Math.min(2000 * Math.pow(2, attempt), 8000));
+    }
+  }
+
+  console.error(JSON.stringify({
+    error: getErrorMessage(lastError),
+    code: getErrorCode(lastError),
+  }));
+  process.exit(2);
+})();
+`
+
+function getNodeBinaryCandidates() {
+  const candidates = [
+    process.env.SANTI_NODE_BINARY,
+    process.env.NODE_BINARY,
+    'node',
+  ]
+
+  if (process.platform === 'darwin') {
+    candidates.push('/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node')
+  } else if (process.platform === 'win32') {
+    candidates.push('node.exe')
+  } else {
+    candidates.push('/usr/local/bin/node', '/usr/bin/node')
+  }
+
+  return [...new Set(candidates.filter(isNonEmptyString))]
+}
+
+function runNodeCliFetchWithBinary(
+  nodeBinary: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal | null,
+): Promise<NodeCliFetchResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(nodeBinary, ['-e', NODE_CLI_FETCH_SCRIPT], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    })
+
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    let settled = false
+
+    const finish = (error?: Error, result?: NodeCliFetchResult) => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', abortChild)
+      if (error) {
+        reject(error)
+        return
+      }
+      resolve(result!)
+    }
+
+    const abortChild = () => {
+      child.kill('SIGTERM')
+      finish(new Error('请求已取消'))
+    }
+
+    child.stdout.on('data', (chunk: Buffer | string) => {
+      stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    })
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    })
+    child.on('error', (error) => {
+      finish(error)
+    })
+    child.on('close', (code) => {
+      if (settled) return
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8')
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim()
+      if (code !== 0) {
+        finish(new Error(stderr || `node child exited with code ${code}`))
+        return
+      }
+      try {
+        finish(undefined, JSON.parse(stdout) as NodeCliFetchResult)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        finish(new Error(`node child returned invalid JSON: ${detail}; stderr=${stderr.slice(0, 300)}`))
+      }
+    })
+
+    if (signal?.aborted) {
+      abortChild()
+      return
+    }
+    signal?.addEventListener('abort', abortChild, { once: true })
+
+    child.stdin.end(JSON.stringify(payload))
+  })
+}
+
+async function fetchTextViaNodeCli(url: string, init: RequestInit): Promise<Response> {
+  const bodyBuffer = bodyInitToBuffer(init.body)
+  const payload = {
+    url,
+    method: init.method || 'GET',
+    headers: normalizeRequestHeaders(init.headers),
+    bodyBase64: bodyBuffer ? bodyBuffer.toString('base64') : undefined,
+    timeoutMs: 600000,
+    retryCount: 2,
+  }
+
+  let lastError: unknown
+  for (const nodeBinary of getNodeBinaryCandidates()) {
+    try {
+      const result = await runNodeCliFetchWithBinary(nodeBinary, payload, init.signal)
+      console.log('[API Fetch] Responses node child succeeded', { nodeBinary, status: result.status })
+      return responseFromNodeText(
+        Buffer.from(result.bodyBase64 || '', 'base64'),
+        result.status,
+        result.statusText,
+        result.headers,
+      )
+    } catch (error) {
+      lastError = error
+      console.warn('[API Fetch] Responses node child failed', {
+        nodeBinary,
+        error: getFetchErrorMessage(error),
+      })
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'node child fetch failed'))
+}
+
+function fetchTextViaNodeHttp(
+  url: string,
+  init: RequestInit,
+  maxRedirects = 5,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    if (maxRedirects < 0) {
+      reject(new Error('Too many redirects'))
+      return
+    }
+
+    const parsedUrl = new URL(url)
+    const client = parsedUrl.protocol === 'https:' ? https : http
+    const headers = normalizeRequestHeaders(init.headers)
+    const bodyBuffer = bodyInitToBuffer(init.body)
+    if (bodyBuffer && !hasHeader(headers, 'content-length')) {
+      headers['Content-Length'] = String(bodyBuffer.length)
+    }
+
+    const request = client.request(
+      parsedUrl,
+      {
+        method: init.method || 'GET',
+        headers,
+      },
+      (response) => {
+        const status = response.statusCode ?? 0
+        const location = response.headers.location
+        if ([301, 302, 303, 307, 308].includes(status) && location) {
+          response.resume()
+          const redirectUrl = new URL(location, url).toString()
+          resolve(fetchTextViaNodeHttp(redirectUrl, init, maxRedirects - 1))
+          return
+        }
+
+        const chunks: Buffer[] = []
+        response.on('data', (chunk: Buffer | string) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        })
+        response.on('end', () => {
+          const buffer = Buffer.concat(chunks)
+          resolve(responseFromNodeText(
+            buffer,
+            status,
+            response.statusMessage || '',
+            normalizeResponseHeaders(response.headers),
+          ))
+        })
+        response.on('error', reject)
+      },
+    )
+
+    const abortRequest = () => request.destroy(new Error('请求已取消'))
+
+    request.on('error', reject)
+    request.on('close', () => {
+      init.signal?.removeEventListener('abort', abortRequest)
+    })
+
+    if (init.signal?.aborted) {
+      abortRequest()
+      return
+    }
+    init.signal?.addEventListener('abort', abortRequest, { once: true })
+
+    request.end(bodyBuffer)
+  })
+}
+
+function fetchBinaryViaNode(
+  url: string,
+  options: {
+    method?: string
+    headers?: Record<string, string>
+    timeoutMs?: number
+    signal?: AbortSignal
+    maxRedirects?: number
+  } = {},
+): Promise<BinaryFetchResult> {
+  return new Promise((resolve, reject) => {
+    const maxRedirects = options.maxRedirects ?? 5
+    if (maxRedirects < 0) {
+      reject(new Error('Too many redirects'))
+      return
+    }
+
+    const parsedUrl = new URL(url)
+    const client = parsedUrl.protocol === 'https:' ? https : http
+    const request = client.request(
+      parsedUrl,
+      {
+        method: options.method || 'GET',
+        headers: options.headers,
+      },
+      (response) => {
+        const status = response.statusCode ?? 0
+        const location = response.headers.location
+        if ([301, 302, 303, 307, 308].includes(status) && location) {
+          response.resume()
+          const redirectUrl = new URL(location, url).toString()
+          resolve(fetchBinaryViaNode(redirectUrl, { ...options, maxRedirects: maxRedirects - 1 }))
+          return
+        }
+
+        const chunks: Buffer[] = []
+        response.on('data', (chunk: Buffer | string) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        })
+        response.on('end', () => {
+          const buffer = Buffer.concat(chunks)
+          resolve({
+            ok: status >= 200 && status < 300,
+            status,
+            statusText: response.statusMessage || '',
+            headers: normalizeResponseHeaders(response.headers),
+            bodyBase64: buffer.toString('base64'),
+          })
+        })
+        response.on('error', reject)
+      },
+    )
+
+    const clearRequestTimeout = options.timeoutMs
+      ? setTimeout(() => request.destroy(new Error('请求超时')), options.timeoutMs)
+      : null
+    const abortRequest = () => request.destroy(new Error('请求已取消'))
+
+    request.on('error', reject)
+    request.on('close', () => {
+      if (clearRequestTimeout) clearTimeout(clearRequestTimeout)
+      options.signal?.removeEventListener('abort', abortRequest)
+    })
+
+    if (options.signal?.aborted) {
+      abortRequest()
+      return
+    }
+    options.signal?.addEventListener('abort', abortRequest, { once: true })
+    request.end()
+  })
+}
+
+function getFetchErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause
+    if (cause instanceof Error && cause.message && cause.message !== error.message) {
+      return `${error.message}; cause: ${cause.message}`
+    }
+    return error.message
+  }
+  return String(error || 'unknown error')
+}
+
+function shouldRetryWithNodeFetch(error: unknown) {
+  const message = getFetchErrorMessage(error).toLowerCase()
+  return (
+    message.includes('err_connection_closed') ||
+    message.includes('err_http2_protocol_error') ||
+    message.includes('err_connection_reset') ||
+    message.includes('socket hang up') ||
+    message.includes('econnreset') ||
+    message.includes('other side closed') ||
+    message.includes('fetch failed')
+  )
+}
+
+async function fetchViaElectronNet(url: string, init: RequestInit): Promise<Response> {
+  const isResponsesRequest = /\/responses(?:[/?]|$)/i.test(url)
+
+  // IMAGE2 works in the standalone Node test script even when Electron's embedded
+  // network stacks fail. Start with an external Node child so TLS/runtime behavior
+  // matches that verified path.
+  if (isResponsesRequest) {
+    try {
+      console.log('[API Fetch] Responses transport: node:child')
+      return await fetchTextViaNodeCli(url, init)
+    } catch (childError) {
+      if (init.signal?.aborted) throw childError
+      console.warn('[API Fetch] node child failed for Responses, retrying with node:http', {
+        url,
+        error: getFetchErrorMessage(childError),
+      })
+    }
+
+    try {
+      console.log('[API Fetch] Responses transport: node:http')
+      return await fetchTextViaNodeHttp(url, init)
+    } catch (error) {
+      if (init.signal?.aborted) throw error
+      console.warn('[API Fetch] node:http failed for Responses, retrying with Node fetch', {
+        url,
+        error: getFetchErrorMessage(error),
+      })
+      try {
+        return await fetch(url, init)
+      } catch (fetchError) {
+        if (typeof net.fetch !== 'function') throw fetchError
+        console.warn('[API Fetch] Node fetch failed for Responses, falling back to Electron net.fetch', {
+          url,
+          error: getFetchErrorMessage(fetchError),
+        })
+        return net.fetch(url, init)
+      }
+    }
+  }
+
+  // Electron/Chromium respects system proxy settings better than Node's undici fetch.
+  // This matters for proxy fake-ip environments where Node resolves cloud domains to 198.18.x.x.
+  if (typeof net.fetch === 'function') {
+    try {
+      return await net.fetch(url, init)
+    } catch (error) {
+      if (init.signal?.aborted || !shouldRetryWithNodeFetch(error)) throw error
+      console.warn('[API Fetch] Electron net.fetch failed, retrying with Node fetch', {
+        url,
+        error: getFetchErrorMessage(error),
+      })
+      return fetch(url, init)
+    }
+  }
+  return fetch(url, init)
 }
 
 function resolveImageHostUploadUrl(provider: ImageHostUploadProvider) {
@@ -775,7 +1431,13 @@ async function uploadImageHostFromMain({
           ? errorMessage
           : typeof messageField === 'string'
             ? messageField
-            : text || `上传失败: ${response.status}`
+          : text || `上传失败: ${response.status}`
+        console.error('[ImageHost/Main] Upload failed', {
+          provider: provider.name,
+          platform: provider.platform,
+          status: response.status,
+          message,
+        })
         return { success: false, error: message }
       }
 
@@ -804,13 +1466,29 @@ async function uploadImageHostFromMain({
       return { success: false, error: `图床 ${provider.name} 上传成功但未返回 URL` }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
+        console.error('[ImageHost/Main] Upload timeout', {
+          provider: provider.name,
+          platform: provider.platform,
+          uploadUrl,
+        })
         return { success: false, error: '上传超时，请稍后重试' }
       }
+      console.error('[ImageHost/Main] Upload exception', {
+        provider: provider.name,
+        platform: provider.platform,
+        uploadUrl,
+        error: error instanceof Error ? error.message : String(error),
+      })
       return { success: false, error: error instanceof Error ? error.message : '上传失败' }
     } finally {
       clearTimeout(timeout)
     }
   } catch (error) {
+    console.error('[ImageHost/Main] Upload setup failed', {
+      provider: provider.name,
+      platform: provider.platform,
+      error: error instanceof Error ? error.message : String(error),
+    })
     return { success: false, error: error instanceof Error ? error.message : '上传失败' }
   }
 }
@@ -819,17 +1497,21 @@ async function uploadImageHostFromMain({
 ipcMain.handle('save-image', async (_event, { url, category, filename }) => {
   try {
     const imagesDir = getImagesDir(category)
-    const ext = path.extname(filename) || '.png'
+    const dataUrlMatch = url.startsWith('data:')
+      ? url.match(/^data:([^;]+);base64,(.+)$/s)
+      : null
+    const ext = dataUrlMatch
+      ? getImageExtensionFromMime(dataUrlMatch[1]) || path.extname(filename) || '.png'
+      : path.extname(filename) || '.png'
     const safeName = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}${ext}`
     const filePath = path.join(imagesDir, safeName)
-    
+
     // data: URL — 直接解码 base64 写入文件（canvas 切割产物）
     if (url.startsWith('data:')) {
-      const matches = url.match(/^data:[^;]+;base64,(.+)$/s)
-      if (!matches) {
+      if (!dataUrlMatch) {
         return { success: false, error: 'Invalid data URL format' }
       }
-      const buffer = Buffer.from(matches[1], 'base64')
+      const buffer = Buffer.from(dataUrlMatch[2], 'base64')
       if (buffer.length === 0) {
         return { success: false, error: 'Decoded base64 data is empty (0 bytes)' }
       }
@@ -837,14 +1519,14 @@ ipcMain.handle('save-image', async (_event, { url, category, filename }) => {
     } else {
       await downloadImage(url, filePath)
     }
-    
+
     // Validate file was written successfully with non-zero size
     const stat = fs.statSync(filePath)
     if (stat.size === 0) {
       fs.unlinkSync(filePath) // Clean up empty file
       return { success: false, error: 'Saved file is 0 bytes' }
     }
-    
+
     // Return local path that can be used in the app
     return { success: true, localPath: `local-image://${category}/${safeName}` }
   } catch (error) {
@@ -857,10 +1539,10 @@ ipcMain.handle('get-image-path', async (_event, localPath: string) => {
   // Convert local-image://category/filename to actual file path
   const match = localPath.match(/^local-image:\/\/(.+)\/(.+)$/)
   if (!match) return null
-  
+
   const [, category, filename] = match
   const filePath = path.join(getMediaRoot(), category, filename)
-  
+
   if (fs.existsSync(filePath)) {
     // Windows: file:///H:/path/to/file.png (三斜杠 + 正斜杠)
     return `file:///${filePath.replace(/\\/g, '/')}`
@@ -871,10 +1553,10 @@ ipcMain.handle('get-image-path', async (_event, localPath: string) => {
 ipcMain.handle('delete-image', async (_event, localPath: string) => {
   const match = localPath.match(/^local-image:\/\/(.+)\/(.+)$/)
   if (!match) return false
-  
+
   const [, category, filename] = match
   const filePath = path.join(getMediaRoot(), category, filename)
-  
+
   try {
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath)
@@ -889,7 +1571,7 @@ ipcMain.handle('delete-image', async (_event, localPath: string) => {
 ipcMain.handle('read-image-base64', async (_event, localPath: string) => {
   try {
     let filePath: string
-    
+
     // Handle local-image:// protocol
     const match = localPath.match(/^local-image:\/\/(.+)\/(.+)$/)
     if (match) {
@@ -900,11 +1582,11 @@ ipcMain.handle('read-image-base64', async (_event, localPath: string) => {
     } else {
       filePath = localPath
     }
-    
+
     if (!fs.existsSync(filePath)) {
       return { success: false, error: 'File not found' }
     }
-    
+
     const data = fs.readFileSync(filePath)
     const ext = path.extname(filePath).toLowerCase()
     const mimeTypes: Record<string, string> = {
@@ -913,10 +1595,15 @@ ipcMain.handle('read-image-base64', async (_event, localPath: string) => {
       '.jpeg': 'image/jpeg',
       '.gif': 'image/gif',
       '.webp': 'image/webp',
+      '.mp4': 'video/mp4',
+      '.webm': 'video/webm',
+      '.mov': 'video/quicktime',
+      '.avi': 'video/x-msvideo',
+      '.mkv': 'video/x-matroska',
     }
     const mimeType = mimeTypes[ext] || 'image/png'
     const base64 = `data:${mimeType};base64,${data.toString('base64')}`
-    
+
     return { success: true, base64, mimeType, size: data.length }
   } catch (error) {
     console.error('Failed to read image:', error)
@@ -928,10 +1615,10 @@ ipcMain.handle('read-image-base64', async (_event, localPath: string) => {
 ipcMain.handle('get-absolute-path', async (_event, localPath: string) => {
   const match = localPath.match(/^local-image:\/\/(.+)\/(.+)$/)
   if (!match) return null
-  
+
   const [, category, filename] = match
   const filePath = path.join(getMediaRoot(), category, decodeURIComponent(filename))
-  
+
   if (fs.existsSync(filePath)) {
     return filePath
   }
@@ -1068,14 +1755,14 @@ ipcMain.handle('storage-validate-data-dir', async (_event, dirPath: string) => {
     if (!dirPath) return { valid: false, error: '路径不能为空' }
     const target = normalizePath(dirPath)
     if (!fs.existsSync(target)) return { valid: false, error: '目录不存在' }
-    
+
     // Check for projects/ subfolder with .json files or _p/ per-project dirs
     const projectsDir = path.join(target, 'projects')
     const mediaDir = path.join(target, 'media')
-    
+
     let projectCount = 0
     let mediaCount = 0
-    
+
     if (fs.existsSync(projectsDir)) {
       const files = await fs.promises.readdir(projectsDir)
       // Count root .json files (global stores)
@@ -1088,16 +1775,16 @@ ipcMain.handle('storage-validate-data-dir', async (_event, dirPath: string) => {
         if (dirCount > 0) projectCount = Math.max(projectCount, dirCount)
       }
     }
-    
+
     if (fs.existsSync(mediaDir)) {
       const entries = await fs.promises.readdir(mediaDir)
       mediaCount = entries.length
     }
-    
+
     if (projectCount === 0 && mediaCount === 0) {
       return { valid: false, error: '该目录不包含有效的数据（需要 projects/ 或 media/ 子目录）' }
     }
-    
+
     return { valid: true, projectCount, mediaCount }
   } catch (error) {
     return { valid: false, error: String(error) }
@@ -1110,18 +1797,18 @@ ipcMain.handle('storage-link-data', async (_event, dirPath: string) => {
     if (!dirPath) return { success: false, error: '路径不能为空' }
     const target = normalizePath(dirPath)
     if (!fs.existsSync(target)) return { success: false, error: '目录不存在' }
-    
+
     // Validate it has data
     const projectsDir = path.join(target, 'projects')
     const mediaDir = path.join(target, 'media')
-    
+
     const hasProjects = fs.existsSync(projectsDir)
     const hasMedia = fs.existsSync(mediaDir)
-    
+
     if (!hasProjects && !hasMedia) {
       return { success: false, error: '该目录不包含有效的数据（需要 projects/ 或 media/ 子目录）' }
     }
-    
+
     // Update config to point to this directory
     storageConfig.basePath = target
     storageConfig.projectPath = '' // Clear legacy
@@ -1140,21 +1827,21 @@ ipcMain.handle('storage-move-data', async (_event, newPath: string) => {
     if (!newPath) return { success: false, error: '路径不能为空' }
     const target = normalizePath(newPath)
     const currentBase = getStorageBasePath()
-    
+
     if (currentBase === target) return { success: true, path: currentBase }
-    
+
     // Check for path conflicts
     const conflictError = pathsConflict(currentBase, target)
     if (conflictError) {
       return { success: false, error: conflictError }
     }
-    
+
     // Ensure target directories exist
     const targetProjectsDir = path.join(target, 'projects')
     const targetMediaDir = path.join(target, 'media')
     ensureDir(targetProjectsDir)
     ensureDir(targetMediaDir)
-    
+
     // Move projects
     const currentProjectsDir = getProjectDataRoot()
     if (fs.existsSync(currentProjectsDir)) {
@@ -1165,7 +1852,7 @@ ipcMain.handle('storage-move-data', async (_event, newPath: string) => {
         await fs.promises.cp(src, dest, { recursive: true, force: true })
       }
     }
-    
+
     // Move media
     const currentMediaDir = getMediaRoot()
     if (fs.existsSync(currentMediaDir)) {
@@ -1176,13 +1863,13 @@ ipcMain.handle('storage-move-data', async (_event, newPath: string) => {
         await fs.promises.cp(src, dest, { recursive: true, force: true })
       }
     }
-    
+
     // Update config
     storageConfig.basePath = target
     storageConfig.projectPath = '' // Clear legacy
     storageConfig.mediaPath = ''   // Clear legacy
     saveStorageConfig()
-    
+
     // Clean up old directories (only if different from userData)
     const userData = app.getPath('userData')
     if (!currentProjectsDir.startsWith(userData)) {
@@ -1191,7 +1878,7 @@ ipcMain.handle('storage-move-data', async (_event, newPath: string) => {
     if (!currentMediaDir.startsWith(userData)) {
       await removeDir(currentMediaDir).catch(() => {})
     }
-    
+
     return { success: true, path: target }
   } catch (error) {
     console.error('Failed to move data:', error)
@@ -1205,20 +1892,20 @@ ipcMain.handle('storage-export-data', async (_event, targetPath: string) => {
     if (!targetPath) return { success: false, error: '路径不能为空' }
     const exportDir = path.join(
       normalizePath(targetPath),
-      `moyin-data-${new Date().toISOString().replace(/[:.]/g, '-')}`
+      `santi-data-${new Date().toISOString().replace(/[:.]/g, '-')}`
     )
-    
+
     // Create export structure
     const exportProjectsDir = path.join(exportDir, 'projects')
     const exportMediaDir = path.join(exportDir, 'media')
     ensureDir(exportProjectsDir)
     ensureDir(exportMediaDir)
-    
+
     // Copy projects
     await copyDir(getProjectDataRoot(), exportProjectsDir)
     // Copy media
     await copyDir(getMediaRoot(), exportMediaDir)
-    
+
     return { success: true, path: exportDir }
   } catch (error) {
     console.error('Failed to export data:', error)
@@ -1231,22 +1918,22 @@ ipcMain.handle('storage-import-data', async (_event, sourcePath: string) => {
   try {
     if (!sourcePath) return { success: false, error: '路径不能为空' }
     const source = normalizePath(sourcePath)
-    
+
     const sourceProjectsDir = path.join(source, 'projects')
     const sourceMediaDir = path.join(source, 'media')
-    
+
     // Validate source has data
     const hasProjects = fs.existsSync(sourceProjectsDir)
     const hasMedia = fs.existsSync(sourceMediaDir)
     if (!hasProjects && !hasMedia) {
       return { success: false, error: '源目录不包含有效数据（需要 projects/ 或 media/ 子目录）' }
     }
-    
+
     // Create temporary backup for rollback
-    const backupDir = path.join(os.tmpdir(), `moyin-backup-${Date.now()}`)
+    const backupDir = path.join(os.tmpdir(), `santi-backup-${Date.now()}`)
     const currentProjectsDir = getProjectDataRoot()
     const currentMediaDir = getMediaRoot()
-    
+
     try {
       // Backup existing data
       if (hasProjects && fs.existsSync(currentProjectsDir)) {
@@ -1261,7 +1948,7 @@ ipcMain.handle('storage-import-data', async (_event, sourcePath: string) => {
           await copyDir(currentMediaDir, path.join(backupDir, 'media'))
         }
       }
-      
+
       // Import new data
       if (hasProjects) {
         await removeDir(currentProjectsDir).catch(() => {})
@@ -1271,14 +1958,14 @@ ipcMain.handle('storage-import-data', async (_event, sourcePath: string) => {
         await removeDir(currentMediaDir).catch(() => {})
         await copyDir(sourceMediaDir, currentMediaDir)
       }
-      
+
       // Clear migration flag so migration re-evaluates imported data on next startup
       const migrationFlagPath = path.join(currentProjectsDir, '_p', '_migrated.json')
       if (fs.existsSync(migrationFlagPath)) {
         fs.unlinkSync(migrationFlagPath)
         console.log('Cleared migration flag for re-evaluation after import')
       }
-      
+
       // Success - clean up backup
       await removeDir(backupDir).catch(() => {})
       return { success: true }
@@ -1287,7 +1974,7 @@ ipcMain.handle('storage-import-data', async (_event, sourcePath: string) => {
       console.error('Import failed, rolling back:', importError)
       const backupProjectsDir = path.join(backupDir, 'projects')
       const backupMediaDir = path.join(backupDir, 'media')
-      
+
       if (fs.existsSync(backupProjectsDir)) {
         await removeDir(currentProjectsDir).catch(() => {})
         await copyDir(backupProjectsDir, currentProjectsDir).catch(() => {})
@@ -1297,7 +1984,7 @@ ipcMain.handle('storage-import-data', async (_event, sourcePath: string) => {
         await copyDir(backupMediaDir, currentMediaDir).catch(() => {})
       }
       await removeDir(backupDir).catch(() => {})
-      
+
       throw importError
     }
   } catch (error) {
@@ -1347,7 +2034,7 @@ ipcMain.handle('storage-export-project-data', async (_event, targetPath: string)
     if (!targetPath) return { success: false, error: '路径不能为空' }
     const exportDir = path.join(
       normalizePath(targetPath),
-      `moyin-data-${new Date().toISOString().replace(/[:.]/g, '-')}`
+      `santi-data-${new Date().toISOString().replace(/[:.]/g, '-')}`
     )
     ensureDir(path.join(exportDir, 'projects'))
     ensureDir(path.join(exportDir, 'media'))
@@ -1368,7 +2055,7 @@ ipcMain.handle('storage-import-project-data', async (_event, sourcePath: string)
 
     const currentProjectsDir = getProjectDataRoot()
     const currentMediaDir = getMediaRoot()
-    const backupDir = path.join(os.tmpdir(), `moyin-legacy-import-backup-${Date.now()}`)
+    const backupDir = path.join(os.tmpdir(), `santi-legacy-import-backup-${Date.now()}`)
 
     try {
       if (fs.existsSync(currentProjectsDir)) {
@@ -1427,7 +2114,7 @@ ipcMain.handle('storage-export-media-data', async (_event, targetPath: string) =
     if (!targetPath) return { success: false, error: '路径不能为空' }
     const exportDir = path.join(
       normalizePath(targetPath),
-      `moyin-data-${new Date().toISOString().replace(/[:.]/g, '-')}`
+      `santi-data-${new Date().toISOString().replace(/[:.]/g, '-')}`
     )
     ensureDir(path.join(exportDir, 'projects'))
     ensureDir(path.join(exportDir, 'media'))
@@ -1447,7 +2134,7 @@ ipcMain.handle('storage-import-media-data', async (_event, sourcePath: string) =
     const source = normalizePath(sourcePath)
     if (source === target) return { success: true }
 
-    const backupDir = path.join(os.tmpdir(), `moyin-media-import-backup-${Date.now()}`)
+    const backupDir = path.join(os.tmpdir(), `santi-media-import-backup-${Date.now()}`)
 
     try {
       if (fs.existsSync(target)) {
@@ -1512,21 +2199,11 @@ ipcMain.handle('app-updater-get-current-version', async () => {
 
 ipcMain.handle('app-updater-check', async (): Promise<UpdateCheckResult> => {
   const currentVersion = app.getVersion()
-  try {
-    const update = await resolveAvailableUpdate(currentVersion)
-    return {
-      success: true,
-      currentVersion,
-      hasUpdate: !!update,
-      update,
-    }
-  } catch (error) {
-    console.error('Failed to check updates:', error)
-    return {
-      success: false,
-      currentVersion,
-      error: error instanceof Error ? error.message : String(error),
-    }
+  return {
+    success: true,
+    currentVersion,
+    hasUpdate: false,
+    update: null,
   }
 })
 
@@ -1548,16 +2225,95 @@ ipcMain.handle('app-updater-open-link', async (_event, url: string): Promise<Ope
   }
 })
 
-// ==================== File Export (Save Dialog) ====================
+// ==================== API Fetch (Main Process) ====================
+ipcMain.handle('api-fetch', async (_event, request: ApiFetchRequest): Promise<ApiFetchResponse> => {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? 600000)
+  const shouldTrace = /contents\/generations\/tasks|\/kling\/v1\/videos|\/video-generation|\/video\/|\/videos\/|\/images\/|\/responses/i.test(request.url)
+
+  try {
+    const url = normalizeApiFetchUrl(request.url)
+    const headers = { ...(request.headers || {}) }
+    if (request.responseType === 'base64') {
+      const binary = await fetchBinaryViaNode(url, {
+        method: request.method || 'GET',
+        headers,
+        timeoutMs: request.timeoutMs ?? 600000,
+        signal: controller.signal,
+      })
+      return {
+        ok: binary.ok,
+        status: binary.status,
+        statusText: binary.statusText,
+        headers: binary.headers,
+        body: '',
+        bodyBase64: binary.bodyBase64,
+      }
+    }
+
+    const body = buildApiFetchBody(request, headers)
+    const response = await fetchViaElectronNet(url, {
+      method: request.method || 'GET',
+      headers,
+      body,
+      signal: controller.signal,
+    })
+    const responseHeaders: Record<string, string> = {}
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value
+    })
+    const responseText = await response.text()
+    if (/\/responses(?:[/?]|$)/i.test(url)) {
+      console.log('[API Fetch] IMAGE2 responses summary', {
+        url,
+        method: request.method || 'GET',
+        status: response.status,
+        statusText: response.statusText,
+        contentType: responseHeaders['content-type'],
+        request: summarizeImage2RequestBody(request.body),
+        response: summarizeImage2Sse(responseText),
+      })
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+      body: responseText,
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'API request failed'
+    if (shouldTrace) {
+      console.error('[API Fetch] failed', {
+        url: request.url,
+        method: request.method || 'GET',
+        timeoutMs: request.timeoutMs ?? 600000,
+        error: message,
+      })
+    }
+    return {
+      ok: false,
+      status: 0,
+      statusText: 'Network Error',
+      headers: {},
+      body: '',
+      error: message,
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+})
+
 ipcMain.handle('save-file-dialog', async (_event, { localPath, defaultPath, filters }: { localPath: string, defaultPath: string, filters: { name: string, extensions: string[] }[] }) => {
   try {
     // Resolve the source file path
     let sourcePath: string | null = null
-    
+
     // Handle local-image:// and local-video:// protocols
     const imageMatch = localPath.match(/^local-image:\/\/(.+)\/(.+)$/)
     const videoMatch = localPath.match(/^local-video:\/\/(.+)\/(.+)$/)
-    
+
     if (imageMatch) {
       const [, category, filename] = imageMatch
       sourcePath = path.join(getMediaRoot(), category, decodeURIComponent(filename))
@@ -1569,24 +2325,24 @@ ipcMain.handle('save-file-dialog', async (_event, { localPath, defaultPath, filt
     } else {
       sourcePath = localPath
     }
-    
+
     if (!sourcePath || !fs.existsSync(sourcePath)) {
       return { success: false, error: 'Source file not found' }
     }
-    
+
     // Show save dialog
     const result = await dialog.showSaveDialog({
       defaultPath: defaultPath,
       filters: filters,
     })
-    
+
     if (result.canceled || !result.filePath) {
       return { success: false, canceled: true }
     }
-    
+
     // Copy file to destination
     fs.copyFileSync(sourcePath, result.filePath)
-    
+
     return { success: true, filePath: result.filePath }
   } catch (error) {
     console.error('Failed to save file:', error)
@@ -1618,12 +2374,12 @@ function copyDirSync(src: string, dest: string) {
 
 /**
  * Seed demo project data on first run.
- * Checks if moyin-project-store.json exists in the project data root.
+ * Checks if santi-project-store.json exists in the project data root.
  * If not, copies demo data (JSON + media) to the user's storage directory.
  */
 function seedDemoProject() {
   const projectDataRoot = getProjectDataRoot()
-  const marker = path.join(projectDataRoot, 'moyin-project-store.json')
+  const marker = path.join(projectDataRoot, 'santi-project-store.json')
 
   if (fs.existsSync(marker)) {
     // Not first run — project store already exists
@@ -1683,10 +2439,10 @@ app.whenReady().then(() => {
       const category = url.hostname
       const filename = decodeURIComponent(url.pathname.slice(1)) // Remove leading / and decode
       const filePath = path.join(getMediaRoot(), category, filename)
-      
+
       // Read file directly
       const data = fs.readFileSync(filePath)
-      
+
       // Determine MIME type based on extension
       const ext = path.extname(filename).toLowerCase()
       const mimeTypes: Record<string, string> = {
@@ -1705,7 +2461,7 @@ app.whenReady().then(() => {
         '.mkv': 'video/x-matroska',
       }
       const mimeType = mimeTypes[ext] || 'application/octet-stream'
-      
+
       return new Response(data, {
         headers: { 'Content-Type': mimeType }
       })
@@ -1714,6 +2470,6 @@ app.whenReady().then(() => {
       return new Response('Image not found', { status: 404 })
     }
   })
-  
+
   createWindow()
 })

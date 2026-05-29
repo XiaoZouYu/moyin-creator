@@ -77,7 +77,23 @@ contextBridge.exposeInMainWorld('storageManager', {
 contextBridge.exposeInMainWorld('electronAPI', {
   saveFileDialog: (options: { localPath: string, defaultPath: string, filters: { name: string, extensions: string[] }[] }) =>
     ipcRenderer.invoke('save-file-dialog', options),
-})
+  apiFetch: (options: {
+    url: string
+    method?: string
+    headers?: Record<string, string>
+    body?: string
+    bodyBase64?: string
+    formData?: Array<{
+      name: string
+      value?: string
+      fileName?: string
+      mimeType?: string
+      dataBase64?: string
+    }>
+    timeoutMs?: number
+    responseType?: 'text' | 'base64'
+	  }) => ipcRenderer.invoke('api-fetch', options),
+	})
 
 contextBridge.exposeInMainWorld('appUpdater', {
   getCurrentVersion: () => ipcRenderer.invoke('app-updater-get-current-version'),

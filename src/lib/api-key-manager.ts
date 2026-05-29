@@ -6,6 +6,9 @@
  * Based on AionUi's ApiKeyManager pattern
  */
 
+import { generateUUID } from "@/lib/utils";
+import { isImage2ModelName } from "@/lib/ai/provider-platforms";
+
 // ==================== Types ====================
 
 export type ModelCapability = 
@@ -34,29 +37,9 @@ export interface IProvider {
  * 默认供应商模板
  * 
  * 核心供应商：
- * 1. 魔因API (memefast) - 全功能 AI 中转（推荐），支持文本/图片/视频/识图
- * 2. RunningHub - 视角切换/多角度生成
+ * 1. RunningHub - 视角切换/多角度生成
  */
 export const DEFAULT_PROVIDERS: Omit<IProvider, 'id' | 'apiKey'>[] = [
-  {
-    platform: 'memefast',
-    name: '魔因API',
-    baseUrl: 'https://memefast.top',
-    model: [
-      'deepseek-v3.2',
-      'glm-4.7',
-      'gemini-3-pro-preview',
-      'gemini-3-pro-image-preview',
-      'gpt-image-1.5',
-      'doubao-seedance-1-5-pro-251215',
-      'veo3.1',
-      'sora-2-all',
-      'wan2.6-i2v',
-      'grok-video-3-10s',
-      'claude-haiku-4-5-20251001',
-    ],
-    capabilities: ['text', 'vision', 'image_generation', 'video_generation'],
-  },
   {
     platform: 'runninghub',
     name: 'RunningHub',
@@ -91,6 +74,7 @@ export function classifyModelByName(modelName: string): ModelCapability[] {
     'gpt-image', 'ideogram', 'sd3', 'stable-diffusion', 'sdxl',
     'playground', 'recraft', 'kolors', 'seedream',
   ];
+  if (isImage2ModelName(modelName)) return ['image_generation'];
   if (imageGenPatterns.some(p => name.includes(p))) return ['image_generation'];
   // "xxx-image-preview" 类（如 gemini-3-pro-image-preview）
   if (/image[- ]?preview/.test(name)) return ['image_generation'];
@@ -115,24 +99,70 @@ export function classifyModelByName(modelName: string): ModelCapability[] {
 
 /**
  * 模型 API 调用格式
- * 基于 MemeFast 等平台 /v1/models 返回的 supported_endpoint_types 字段
+ * 基于 OpenAI 兼容中转 等平台 /v1/models 返回的 supported_endpoint_types 字段
  */
 export type ModelApiFormat =
   | 'openai_chat'        // /v1/chat/completions （文本/对话，也用于 Gemini 图片生成）
+  | 'openai_responses_image' // /v1/responses + image_generation tool（旧 IMAGE2 兼容）
   | 'openai_images'      // /v1/images/generations （标准图片生成）
   | 'openai_video'       // /v1/videos/generations （标准视频生成）
   | 'kling_image'        // /kling/v1/images/generations 或 /kling/v1/images/omni-image
   | 'unsupported';       // 不支持的端点格式
 
-// MemeFast supported_endpoint_types 值 → 我们的图片 API 格式
+// OpenAI 兼容中转 supported_endpoint_types 值 → 我们的图片 API 格式
 const IMAGE_ENDPOINT_MAP: Record<string, ModelApiFormat> = {
   'image-generation': 'openai_images',
   'dall-e-3': 'openai_images',  // z-image-turbo, qwen-image-max 等走 /v1/images/generations
   'aigc-image': 'openai_images', // aigc-image-gem, aigc-image-qwen
+  'openai-response': 'openai_responses_image',
+  'responses': 'openai_responses_image',
+  'image2': 'openai_responses_image',
   'openai': 'openai_chat',  // 如 gpt-image-1-all 通过 chat completions 生图
 };
 
-// MemeFast supported_endpoint_types 值 → 我们的视频 API 格式能力分类
+function inferImageApiFormatByModelName(modelName?: string): ModelApiFormat | undefined {
+  if (!modelName) return undefined;
+  const name = modelName.toLowerCase();
+
+  // images2.0 follows the official Images API unless a provider profile overrides it.
+  if (/^images?[-_]?2(?:\.0)?$/.test(name) || name === 'images2.0') {
+    return 'openai_images';
+  }
+
+  // gpt-image-2 走 IMAGE2 Responses API：/v1/responses + image_generation tool。
+  if (isImage2ModelName(modelName) && /^gpt-image-2(?:$|[-_.])/.test(name)) {
+    return 'openai_responses_image';
+  }
+
+  // Kling image models → native /kling/v1/images/* endpoint
+  if (/^kling-(image|omni-image)$/i.test(name)) {
+    return 'kling_image';
+  }
+
+  // Gemini image models → chat completions 多模态
+  if (name.includes('gemini') && (name.includes('image') || name.includes('imagen'))) {
+    return 'openai_chat';
+  }
+
+  // Other GPT Image models use the official Images API format.
+  if (/^gpt-image(?:$|[-_.])/.test(name) || name.includes('chatgpt-image')) {
+    return 'openai_images';
+  }
+
+  // GPT image, flux, dall-e, ideogram, sd, recraft → standard images API
+  if (/flux|dall-e|dalle|ideogram|stable-diffusion|sdxl|sd3|recraft|kolors|cogview/.test(name)) {
+    return 'openai_images';
+  }
+
+  // sora_image → openai chat
+  if (name.includes('sora') && name.includes('image')) {
+    return 'openai_chat';
+  }
+
+  return undefined;
+}
+
+// OpenAI 兼容中转 supported_endpoint_types 值 → 我们的视频 API 格式能力分类
 // 注意：这里统一映射为 'openai_video' 仅表示「视频生成能力」，实际 API 路由由 use-video-generation.ts 中的 VIDEO_FORMAT_MAP 决定
 const VIDEO_ENDPOINT_MAP: Record<string, ModelApiFormat> = {
   '视频统一格式': 'openai_video',
@@ -158,8 +188,29 @@ const VIDEO_ENDPOINT_MAP: Record<string, ModelApiFormat> = {
  * 当端点元数据不可用时，根据模型名称推断
  */
 export function resolveImageApiFormat(endpointTypes: string[] | undefined, modelName?: string): ModelApiFormat {
+  const inferredByName = inferImageApiFormatByModelName(modelName);
+  const isGptImage2Model = !!modelName && /^gpt-image-2(?:$|[-_.])/.test(modelName.toLowerCase());
+  const isGptImageModel = !!modelName && /^gpt-image(?:$|[-_.])/.test(modelName.toLowerCase());
+
+  // gpt-image-2 使用 IMAGE2 Responses API：/v1/responses + image_generation tool。
+  if (isGptImage2Model) return 'openai_responses_image';
+
+  // 其它 GPT Image 仍使用官方 Images API：/v1/images/generations 或 /v1/images/edits。
+  if (isGptImageModel) return 'openai_images';
+
+  // images2.0 按官方 Images API 处理；auto-vip 之类的供应商由 provider profile 覆盖。
+  if (inferredByName === 'openai_images' && isImage2ModelName(modelName)) return 'openai_images';
+
   // 1. 使用 API 返回的端点元数据
   if (endpointTypes && endpointTypes.length > 0) {
+    // 有些 OpenAI 兼容代理只返回泛化的 "openai" endpoint。
+    // 这时需要用模型名兜底，否则 gpt-image-* 会被误路由到 chat/completions。
+    if (inferredByName && endpointTypes.includes('openai')) return inferredByName;
+
+    for (const t of endpointTypes) {
+      if (IMAGE_ENDPOINT_MAP[t] === 'openai_responses_image') return 'openai_responses_image';
+    }
+
     // 优先使用 image-generation 端点
     for (const t of endpointTypes) {
       if (IMAGE_ENDPOINT_MAP[t] === 'openai_images') return 'openai_images';
@@ -172,25 +223,7 @@ export function resolveImageApiFormat(endpointTypes: string[] | undefined, model
   }
 
   // 2. Fallback: 根据模型名称推断 API 格式
-  if (modelName) {
-    const name = modelName.toLowerCase();
-    // Kling image models → native /kling/v1/images/* endpoint
-    if (/^kling-(image|omni-image)$/i.test(name)) {
-      return 'kling_image';
-    }
-    // Gemini image models → chat completions 多模态
-    if (name.includes('gemini') && (name.includes('image') || name.includes('imagen'))) {
-      return 'openai_chat';
-    }
-    // GPT image, flux, dall-e, ideogram, sd, recraft → standard images API
-    if (/gpt-image|flux|dall-e|dalle|ideogram|stable-diffusion|sdxl|sd3|recraft|kolors|cogview/.test(name)) {
-      return 'openai_images';
-    }
-    // sora_image → openai chat
-    if (name.includes('sora') && name.includes('image')) {
-      return 'openai_chat';
-    }
-  }
+  if (inferredByName) return inferredByName;
 
   return 'openai_images'; // ultimate fallback
 }
@@ -215,7 +248,7 @@ export function resolveVideoApiFormat(endpointTypes: string[] | undefined): Mode
  * Generate a UUID v4
  */
 export function generateId(): string {
-  return crypto.randomUUID();
+  return generateUUID();
 }
 
 /**
@@ -271,7 +304,7 @@ function isModelIncompatibleError(errorText?: string): boolean {
 
 /**
  * 检测 HTTP 500 响应体中是否包含上游负载饱和相关关键词。
- * MemeFast 有时用 500 而非 503/529 返回负载饱和错误。
+ * OpenAI 兼容中转 有时用 500 而非 503/529 返回负载饱和错误。
  */
 function isUpstreamOverloadError(errorText?: string): boolean {
   if (!errorText) return false;
@@ -378,7 +411,7 @@ export class ApiKeyManager {
       this.markCurrentKeyFailed('auth');
       return true;
     }
-    // 所有 5xx 服务端错误均触发 key 轮转（memefast 等中转站 500 多为临时性故障）
+    // 所有 5xx 服务端错误均触发 key 轮转（aggregator 等中转站 500 多为临时性故障）
     if (statusCode >= 500) {
       this.markCurrentKeyFailed('service_unavailable');
       return true;

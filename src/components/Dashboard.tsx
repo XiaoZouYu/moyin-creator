@@ -12,6 +12,7 @@ import { useState, useCallback } from "react";
 import { useProjectStore } from "@/stores/project-store";
 import { useMediaPanelStore } from "@/stores/media-panel-store";
 import { switchProject } from "@/lib/project-switcher";
+import { fileStorage, fileStorageListKeys } from "@/lib/indexed-db-storage";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -184,7 +185,7 @@ export function Dashboard() {
       ];
 
       let copiedCount = 0;
-      let keysToCopy: string[] = await fs.listKeys?.(`_p/${projectId}`) ?? [];
+      let keysToCopy: string[] = await fileStorageListKeys(`_p/${projectId}`);
       console.log(`[Duplicate] listKeys('_p/${projectId}') → ${keysToCopy.length} keys:`, keysToCopy);
 
       if (keysToCopy.length === 0) {
@@ -193,7 +194,7 @@ export function Dashboard() {
       }
 
       for (const key of keysToCopy) {
-        const rawData = await fs.getItem(key);
+        const rawData = await fileStorage.getItem(key);
         if (!rawData) continue;
 
         // Rewrite activeProjectId so the new project's merge() keys data correctly.
@@ -218,7 +219,7 @@ export function Dashboard() {
         }
 
         const newKey = key.replace(`_p/${projectId}`, `_p/${newProjectId}`);
-        await fs.setItem(newKey, dataToWrite);
+        await fileStorage.setItem(newKey, dataToWrite);
         copiedCount++;
         console.log(`[Duplicate] Copied: ${key} → ${newKey}`);
       }
@@ -276,18 +277,18 @@ export function Dashboard() {
   return (
     <div className="flex flex-col h-full bg-background overflow-hidden">
       {/* Header */}
-      <div className="h-16 border-b border-border bg-panel px-8 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-4">
+      <div className="min-h-16 border-b border-border bg-panel px-4 py-3 sm:px-8 flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 shrink-0">
+        <div className="flex min-w-0 items-center gap-3 sm:gap-4">
           <div className="w-10 h-10 bg-primary text-primary-foreground flex items-center justify-center">
             <Aperture className="w-6 h-6" />
           </div>
-          <div>
-            <h1 className="text-lg font-bold text-foreground tracking-wide">魔因漫创</h1>
-            <p className="text-[10px] text-muted-foreground uppercase tracking-widest">Moyin Creator Studio</p>
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-bold text-foreground tracking-wide">三体漫创</h1>
+            <p className="hidden text-[10px] text-muted-foreground uppercase tracking-widest sm:block">Santi Creator Studio</p>
           </div>
         </div>
         
-        <div className="flex items-center gap-2">
+        <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
           {projects.length > 0 && (
             <Button
               variant={selectionMode ? "secondary" : "outline"}
@@ -309,7 +310,7 @@ export function Dashboard() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-8">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-8">
         <div className="max-w-5xl mx-auto">
           {/* Section Header */}
           <div className="flex items-center justify-between mb-6">

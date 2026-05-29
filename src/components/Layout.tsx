@@ -35,7 +35,7 @@ export function Layout() {
     return (
       <div className="h-full flex bg-background">
         <TabBar />
-        <div className="flex-1">
+        <div className="flex-1 min-w-0 overflow-hidden">
           {activeTab === "settings" ? <SettingsPanel /> : <Dashboard />}
         </div>
       </div>

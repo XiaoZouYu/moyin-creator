@@ -14,6 +14,7 @@ import {
 } from "./types";
 import { TimelineTrack } from "@/types/timeline";
 import { SavedSoundsData, SavedSound, SoundEffect } from "@/types/sounds";
+import { getUserScopedDatabaseName } from "@/lib/user-session";
 
 class StorageService {
   private projectsAdapter: IndexedDBAdapter<SerializedProject>;
@@ -30,13 +31,13 @@ class StorageService {
     };
 
     this.projectsAdapter = new IndexedDBAdapter<SerializedProject>(
-      this.config.projectsDb,
+      getUserScopedDatabaseName(this.config.projectsDb),
       "projects",
       this.config.version
     );
 
     this.savedSoundsAdapter = new IndexedDBAdapter<SavedSoundsData>(
-      this.config.savedSoundsDb,
+      getUserScopedDatabaseName(this.config.savedSoundsDb),
       "saved-sounds",
       this.config.version
     );
@@ -45,12 +46,12 @@ class StorageService {
   // Helper to get project-specific media adapters
   private getProjectMediaAdapters({ projectId }: { projectId: string }) {
     const mediaMetadataAdapter = new IndexedDBAdapter<MediaFileData>(
-      `${this.config.mediaDb}-${projectId}`,
+      getUserScopedDatabaseName(`${this.config.mediaDb}-${projectId}`),
       "media-metadata",
       this.config.version
     );
 
-    const mediaFilesAdapter = new OPFSAdapter(`media-files-${projectId}`);
+    const mediaFilesAdapter = new OPFSAdapter(getUserScopedDatabaseName(`media-files-${projectId}`));
 
     return { mediaMetadataAdapter, mediaFilesAdapter };
   }
@@ -68,7 +69,7 @@ class StorageService {
       : `${this.config.timelineDb}-${projectId}`;
 
     return new IndexedDBAdapter<TimelineData>(
-      dbName,
+      getUserScopedDatabaseName(dbName),
       "timeline",
       this.config.version
     );

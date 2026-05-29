@@ -36,6 +36,7 @@ import {
   Pencil,
   Save,
 } from "lucide-react";
+import { generateUUID } from "@/lib/utils";
 
 type KeyStatus = "pending" | "testing" | "valid" | "invalid";
 
@@ -75,12 +76,12 @@ export function ApiKeyEditorDialog({
 
       if (keyList.length === 0) {
         setKeys([
-          { id: crypto.randomUUID(), value: "", status: "pending", editing: true },
+          { id: generateUUID(), value: "", status: "pending", editing: true },
         ]);
       } else {
         setKeys(
           keyList.map((k) => ({
-            id: crypto.randomUUID(),
+            id: generateUUID(),
             value: k,
             status: "pending",
             editing: false,
@@ -110,7 +111,7 @@ export function ApiKeyEditorDialog({
       const filtered = prev.filter((k) => k.id !== id);
       if (filtered.length === 0) {
         return [
-          { id: crypto.randomUUID(), value: "", status: "pending", editing: true },
+          { id: generateUUID(), value: "", status: "pending", editing: true },
         ];
       }
       return filtered;
@@ -156,7 +157,7 @@ export function ApiKeyEditorDialog({
   const addKey = useCallback(() => {
     setKeys((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), value: "", status: "pending", editing: true },
+      { id: generateUUID(), value: "", status: "pending", editing: true },
     ]);
   }, []);
 
@@ -174,7 +175,7 @@ export function ApiKeyEditorDialog({
       const filtered = prev.filter((k) => k.status !== "invalid");
       if (filtered.length === 0) {
         return [
-          { id: crypto.randomUUID(), value: "", status: "pending", editing: true },
+          { id: generateUUID(), value: "", status: "pending", editing: true },
         ];
       }
       return filtered;

@@ -21,6 +21,7 @@ import {
 import { useMediaStore } from "@/stores/media-store";
 import { useProjectStore } from "@/stores/project-store";
 import { getFeatureConfig, getFeatureNotConfiguredMessage } from "@/lib/ai/feature-router";
+import { corsFetch } from "@/lib/cors-fetch";
 import { submitGridImageRequest } from "@/lib/ai/image-generator";
 import { readImageAsBase64, saveImageToLocal } from "@/lib/image-storage";
 import { Button } from "@/components/ui/button";
@@ -829,7 +830,7 @@ async function pollForVariationImage(
       const url = new URL(taskEndpoint);
       url.searchParams.set('_ts', Date.now().toString());
 
-      const response = await fetch(url.toString(), {
+      const response = await corsFetch(url.toString(), {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Cache-Control': 'no-cache',

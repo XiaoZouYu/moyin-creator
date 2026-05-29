@@ -1,28 +1,24 @@
 {
-  "name": "moyin-creator",
-  "productName": "魔因漫创",
+  "name": "santi-creator",
+  "productName": "三体漫创",
   "version": "0.2.3",
   "description": "AI 驱动的动漫/短剧分镜创作工具",
-  "author": "MemeCalculate",
+  "author": "Santi",
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/MemeCalculate/moyin-creator.git"
+    "url": ""
   },
-  "homepage": "https://github.com/MemeCalculate/moyin-creator",
+  "homepage": "",
   "bugs": {
-    "url": "https://github.com/MemeCalculate/moyin-creator/issues"
-  },
-  "updateConfig": {
-    "manifestUrl": "http://68.64.176.186/moyin/version.json",
-    "defaultGithubUrl": "https://github.com/MemeCalculate/moyin-creator",
-    "defaultBaiduUrl": "https://pan.baidu.com/s/1ImH6tOIiuFxIDXC0fC-6Lg",
-    "defaultBaiduCode": "8888"
+    "url": ""
   },
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
+    "dev:web": "vite --config vite.web.config.ts --host 0.0.0.0",
     "build": "npm run build:desktop",
+    "build:web": "vite build --config vite.web.config.ts",
     "prebuild": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/prebuild-cleanup.ps1",
     "build:desktop": "node ./scripts/build-desktop.mjs",
     "build:win": "node ./scripts/build-desktop.mjs --win",
@@ -33,7 +29,8 @@
     "build:mac:universal": "node ./scripts/build-desktop.mjs --mac --universal",
     "build:linux": "node ./scripts/build-desktop.mjs --linux",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "preview": "electron-vite preview"
+    "preview": "electron-vite preview",
+    "preview:web": "vite preview --config vite.web.config.ts --host 0.0.0.0"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.16",

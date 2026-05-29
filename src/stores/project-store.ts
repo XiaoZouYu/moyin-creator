@@ -3,7 +3,7 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { fileStorage } from "@/lib/indexed-db-storage";
+import { fileStorage, fileStorageListDirs, fileStorageRemoveDir } from "@/lib/indexed-db-storage";
 import { generateUUID } from "@/lib/utils";
 
 export const DEFAULT_FPS = 30;
@@ -29,7 +29,7 @@ interface ProjectStore {
 // Default project for desktop app
 const DEFAULT_PROJECT: Project = {
   id: "default-project",
-  name: "魔因漫创项目",
+  name: "三体漫创项目",
   createdAt: Date.now(),
   updatedAt: Date.now(),
 };
@@ -99,7 +99,7 @@ export const useProjectStore = create<ProjectStore>()(
         });
         // Clean up per-project storage directory
         if (window.fileStorage?.removeDir) {
-          window.fileStorage.removeDir(`_p/${id}`).catch((err: any) =>
+          fileStorageRemoveDir(`_p/${id}`).catch((err: any) =>
             console.warn(`[ProjectStore] Failed to remove project dir _p/${id}:`, err)
           );
         }
@@ -116,7 +116,7 @@ export const useProjectStore = create<ProjectStore>()(
       },
     }),
     {
-      name: "moyin-project-store",
+      name: "santi-project-store",
       storage: createJSONStorage(() => fileStorage),
       partialize: (state) => ({
         projects: state.projects,
@@ -155,9 +155,9 @@ export const useProjectStore = create<ProjectStore>()(
  * 将未在 projects 列表中注册的项目自动恢复。
  * 
  * 解决以下场景：
- * - 更改存储路径并迁移数据后，前端 store 未 reload，或 moyin-project-store.json
+ * - 更改存储路径并迁移数据后，前端 store 未 reload，或 santi-project-store.json
  *   中的 projects 列表不完整（旧版本、手动复制等）
- * - 导入数据后 moyin-project-store.json 缺失或不含新项目
+ * - 导入数据后 santi-project-store.json 缺失或不含新项目
  * - 换电脑后指向旧数据目录，projects 列表为空
  */
 async function discoverProjectsFromDisk(): Promise<void> {
@@ -165,7 +165,7 @@ async function discoverProjectsFromDisk(): Promise<void> {
 
   try {
     // 列出 _p/ 下所有子目录名（每个子目录名就是一个 projectId）
-    const diskProjectIds = await window.fileStorage.listDirs('_p');
+    const diskProjectIds = await fileStorageListDirs('_p');
     if (!diskProjectIds || diskProjectIds.length === 0) return;
 
     const { projects } = useProjectStore.getState();
@@ -187,7 +187,7 @@ async function discoverProjectsFromDisk(): Promise<void> {
 
       // 尝试从 script store 获取名称
       try {
-        const scriptRaw = await window.fileStorage.getItem(`_p/${pid}/script-store`);
+        const scriptRaw = await fileStorage.getItem(`_p/${pid}/script-store`);
         if (scriptRaw) {
           const parsed = JSON.parse(scriptRaw);
           const state = parsed?.state ?? parsed;
@@ -200,7 +200,7 @@ async function discoverProjectsFromDisk(): Promise<void> {
 
       // 尝试从 director store 获取创建时间等信息
       try {
-        const directorRaw = await window.fileStorage.getItem(`_p/${pid}/director-store`);
+        const directorRaw = await fileStorage.getItem(`_p/${pid}/director-store`);
         if (directorRaw) {
           const parsed = JSON.parse(directorRaw);
           const state = parsed?.state ?? parsed;

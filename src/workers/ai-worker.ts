@@ -37,6 +37,15 @@ function buildApiUrl(path: string): string {
   return path;
 }
 
+function getFirstConfiguredApiKey(apiKeys: Record<string, unknown>): string {
+  for (const value of Object.values(apiKeys)) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return '';
+}
+
 // API Response types
 interface ScreenplayAPIResponse {
   screenplay: AIScreenplay;
@@ -166,7 +175,7 @@ async function handleGenerateScreenplay(command: GenerateScreenplayCommand): Pro
     // Note: API key should be passed from main thread in config
     // The main thread gets it from useAPIConfigStore
     const apiKey = (config as any).apiKey || '';
-    const provider = (config as any).chatProvider || 'memefast';
+    const provider = (config as any).chatProvider || 'custom';
     const sceneCount = config.sceneCount || 5;
     
     console.log('[AI Worker] Using sceneCount:', sceneCount);
@@ -231,7 +240,7 @@ async function generateImage(
   referenceImages?: string[]
 ): Promise<string> {
   const apiKey = config.apiKey || (config as any).imageApiKey || '';
-  const provider = (config as any).imageProvider || 'memefast';
+  const provider = (config as any).imageProvider || 'custom';
   
   if (!apiKey) {
     throw new Error('未配置图片生成 API Key');
@@ -287,7 +296,7 @@ async function generateVideo(
   referenceImages?: string[]
 ): Promise<string> {
   const apiKey = config.apiKey || (config as any).videoApiKey || '';
-  const provider = (config as any).videoProvider || 'memefast';
+  const provider = (config as any).videoProvider || 'custom';
   
   if (!apiKey) {
     throw new Error('未配置视频生成 API Key');
@@ -589,6 +598,7 @@ async function handleExecuteScreenplay(command: { type: string; payload: { scree
   
   // Get API keys from config
   const apiKeys = (config as any).apiKeys || {};
+  const configuredApiKey = getFirstConfiguredApiKey(apiKeys);
   const concurrency = config.concurrency || 1;
   
   // Get character reference images from config
@@ -598,9 +608,9 @@ async function handleExecuteScreenplay(command: { type: string; payload: { scree
   // Prepare extended config with API keys
   const extendedConfig = {
     ...config,
-    apiKey: apiKeys.memefast || '',
-    imageApiKey: apiKeys.memefast || '',
-    videoApiKey: apiKeys.memefast || '',
+    apiKey: configuredApiKey,
+    imageApiKey: configuredApiKey,
+    videoApiKey: configuredApiKey,
     mockImage,
     mockVideo,
     characterReferenceImages,
@@ -669,13 +679,14 @@ async function handleExecuteScreenplayImages(command: { type: string; payload: {
   
   // Get API keys from config
   const apiKeys = (config as any).apiKeys || {};
+  const configuredApiKey = getFirstConfiguredApiKey(apiKeys);
   const concurrency = config.concurrency || 1;
   
   console.log('[AI Worker] Config apiKeys:', JSON.stringify(apiKeys));
   console.log('[AI Worker] Config keys:', Object.keys(config as any));
   
   // Validate API key (required for image generation)
-  const imageKey = apiKeys.memefast || '';
+  const imageKey = configuredApiKey;
   if (!imageKey && !mockImage) {
     console.error('[AI Worker] Image API Key not configured');
     postEvent({
@@ -777,6 +788,7 @@ async function handleExecuteScreenplayVideos(command: { type: string; payload: {
   
   // Get API keys from config
   const apiKeys = (config as any).apiKeys || {};
+  const configuredApiKey = getFirstConfiguredApiKey(apiKeys);
   const concurrency = config.concurrency || 1;
   
   // Get character reference images from config
@@ -785,8 +797,8 @@ async function handleExecuteScreenplayVideos(command: { type: string; payload: {
   // Prepare extended config with API keys
   const extendedConfig = {
     ...config,
-    apiKey: apiKeys.memefast || '',
-    videoApiKey: apiKeys.memefast || '',
+    apiKey: configuredApiKey,
+    videoApiKey: configuredApiKey,
     mockVideo,
     characterReferenceImages,
   };

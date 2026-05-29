@@ -23,6 +23,7 @@
  */
 
 import { type SplitScene } from '@/stores/director-store';
+import { corsFetch } from '@/lib/cors-fetch';
 
 
 export interface ScenePromptRequest {
@@ -439,7 +440,7 @@ Return a RAW JSON array (no markdown code block). BILINGUAL output required.
     const endpoint = buildEndpoint(baseUrl, 'chat/completions');
     console.log('[ScenePromptGenerator] Calling chat completion:', { model, hasImage: true, endpoint });
 
-    const response = await fetch(endpoint, {
+    const response = await corsFetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

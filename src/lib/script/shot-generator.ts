@@ -7,6 +7,7 @@
  */
 
 import type { Shot } from "@/types/script";
+import { corsFetch } from "@/lib/cors-fetch";
 import { retryOperation } from "@/lib/utils/retry";
 import { delay, RATE_LIMITS } from "@/lib/utils/rate-limiter";
 
@@ -53,7 +54,7 @@ async function pollTaskStatus(
       const url = new URL(buildEndpoint(baseUrl, `tasks/${taskId}`));
       url.searchParams.set('_ts', Date.now().toString());
 
-      const response = await fetch(url.toString(), {
+      const response = await corsFetch(url.toString(), {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -178,7 +179,7 @@ export async function generateShotImage(
 
   // Use retry wrapper for 429 rate limit handling
   const data = await retryOperation(async () => {
-    const response = await fetch(buildEndpoint(baseUrl, 'images/generations'), {
+    const response = await corsFetch(buildEndpoint(baseUrl, 'images/generations'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -286,7 +287,7 @@ export async function generateShotVideo(
 
   // Use retry wrapper for 429 rate limit handling
   const data = await retryOperation(async () => {
-    const response = await fetch(buildEndpoint(baseUrl, 'videos/generations'), {
+    const response = await corsFetch(buildEndpoint(baseUrl, 'videos/generations'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

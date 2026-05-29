@@ -1,11 +1,11 @@
 # 完整的安装前帮助可以看这里
 https://kvodb27hf3.feishu.cn/wiki/JjSmwf173iN3fqkjXakcGbvTnEf?from=from_copylink
 
-# 🎬 魔因漫创 — 基本工作流教程
+# 🎬 三体漫创 — 基本工作流教程
 
 > 从剧本到成片的完整创作流程指南
 
-魔因漫创内置了多种工作流，各板块可以自由组合、独立使用，满足不同创作场景的需求。**本教程介绍的是最常用的基础工作流，推荐新用户从这里开始。**
+三体漫创内置了多种工作流，各板块可以自由组合、独立使用，满足不同创作场景的需求。**本教程介绍的是最常用的基础工作流，推荐新用户从这里开始。**
 
 ---
 
@@ -27,7 +27,7 @@ https://kvodb27hf3.feishu.cn/wiki/JjSmwf173iN3fqkjXakcGbvTnEf?from=from_copylink
 
 - 建议添加 **尽可能多的 API Key**，系统支持多 Key 轮询负载均衡
 - Key 越多，**并发线程数越高**，批量生成速度越快
-- 支持的服务商：memefast、RunningHub 等
+- 支持的服务商：aggregator、RunningHub 等
 
 ### 2. 服务映射
 

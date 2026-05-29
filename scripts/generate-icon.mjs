@@ -52,7 +52,7 @@ async function generateIcons() {
   console.log('✅ 生成 icon.ico (多尺寸: ' + sizes.join(', ') + ')')
 
   if (process.platform === 'darwin') {
-    const iconsetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'moyin-iconset-'))
+    const iconsetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'santi-iconset-'))
     const iconsetPath = path.join(iconsetDir, 'icon.iconset')
     fs.mkdirSync(iconsetPath, { recursive: true })
 
