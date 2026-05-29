@@ -288,7 +288,7 @@ async function webFetch(targetUrl: string, init?: RequestInit): Promise<Response
 
   const configuredProxy = import.meta.env.VITE_WEB_API_PROXY_URL
   const contentType = response.headers.get('content-type') || ''
-  if (!configuredProxy && response.status === 404) {
+  if (!configuredProxy && response.status === 404 && contentType.includes('text/html')) {
     throw new Error('Web API proxy /__api_proxy 不可用；请使用 npm run dev:web / preview:web，或在部署环境配置 VITE_WEB_API_PROXY_URL')
   }
   if (!configuredProxy && response.ok && contentType.includes('text/html')) {
