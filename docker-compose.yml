@@ -1,0 +1,15 @@
+services:
+  moyin-creator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: moyin-creator:latest
+    container_name: moyin-creator
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8080
+      MAX_PROXY_BODY_BYTES: 52428800
+    ports:
+      - "8080:8080"
