@@ -432,18 +432,32 @@ function getResponsesStatusFromText(text: string): string {
   try {
     return getResponsesStatus(JSON.parse(text));
   } catch {
-    return '';
+    // Fall back to SSE payloads below.
   }
+
+  for (const payload of parseSseJsonPayloads(text)) {
+    const status = getResponsesStatus(payload);
+    if (status) return status;
+  }
+
+  return '';
 }
 
 function getResponsesIdFromText(text: string): string | undefined {
   try {
     const data = JSON.parse(text);
     const id = data?.response?.id || data?.id;
-    return typeof id === 'string' && id.startsWith('resp_') ? id : undefined;
+    if (typeof id === 'string' && id.startsWith('resp_')) return id;
   } catch {
-    return undefined;
+    // Fall back to SSE payloads below.
   }
+
+  for (const payload of parseSseJsonPayloads(text)) {
+    const id = payload?.response?.id || payload?.id;
+    if (typeof id === 'string' && id.startsWith('resp_')) return id;
+  }
+
+  return undefined;
 }
 
 function isResponsesNoFinalImageError(error: unknown): boolean {
@@ -488,29 +502,15 @@ function buildResponsesTextInsteadOfImageError(itemTypes: string, textPreview: s
 
 function parseSseJsonPayloads(text: string): any[] {
   const payloads: any[] = [];
-  const blocks = text.split(/\r?\n\r?\n/);
+  let dataLines: string[] = [];
+  let eventName: string | undefined;
 
-  for (const block of blocks) {
-    const dataLines: string[] = [];
-    let eventName: string | undefined;
-    for (const line of block.split(/\r?\n/)) {
-      if (line.startsWith('event:')) {
-        eventName = line.slice(6).trim();
-        continue;
-      }
-      if (line.startsWith('data:')) {
-        dataLines.push(line.replace(/^data:\s?/, ''));
-        continue;
-      }
-      if (/^(id|retry):/.test(line)) continue;
-      if (line.trim().length === 0) continue;
-      if (dataLines.length === 0) continue;
-      dataLines.push(line);
-    }
-    if (dataLines.length === 0) continue;
+  const flush = () => {
+    if (dataLines.length === 0) return;
 
     const payload = dataLines.join('\n').trim();
-    if (!payload || payload === '[DONE]') continue;
+    dataLines = [];
+    if (!payload || payload === '[DONE]') return;
 
     try {
       const parsed = JSON.parse(payload);
@@ -524,7 +524,31 @@ function parseSseJsonPayloads(text: string): any[] {
     } catch {
       // Ignore malformed keepalive/debug chunks.
     }
+  };
+
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith('event:')) {
+      // Some IMAGE2-compatible providers stream consecutive event/data pairs
+      // without the blank line required by standard SSE. A new event starts a
+      // new payload, so flush the previous one before recording the event name.
+      flush();
+      eventName = line.slice(6).trim();
+      continue;
+    }
+    if (line.startsWith('data:')) {
+      dataLines.push(line.replace(/^data:\s?/, ''));
+      continue;
+    }
+    if (/^(id|retry):/.test(line)) continue;
+    if (line.trim().length === 0) {
+      flush();
+      eventName = undefined;
+      continue;
+    }
+    if (dataLines.length === 0) continue;
+    dataLines.push(line);
   }
+  flush();
 
   return payloads;
 }
@@ -1127,11 +1151,12 @@ async function submitViaResponsesImage(
   } catch (error) {
     const responseId = getResponsesIdFromText(responseText);
     const responseStatus = getResponsesStatusFromText(responseText);
-    if (!responseId || responseStatus === 'completed' || !isResponsesNoFinalImageError(error)) {
+    if (!responseId || !isResponsesNoFinalImageError(error)) {
       throw error;
     }
     console.log('[ImageGenerator] Responses image accepted but final result is not ready, polling response:', {
       responseId,
+      status: responseStatus || 'unknown',
     });
     result = await pollResponsesImageResponse(endpoint, responseId, lastApiKey, keyManager, signal);
   }
