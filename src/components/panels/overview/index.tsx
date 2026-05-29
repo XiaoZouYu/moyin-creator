@@ -259,7 +259,7 @@ export function OverviewPanel() {
               <BookOpen className="h-3.5 w-3.5" />
               新手引导
             </div>
-            <h3 className="mt-2 text-lg font-semibold text-foreground">单机版爱阅真人剧基础工作流</h3>
+            <h3 className="mt-2 text-lg font-semibold text-foreground">三体真人剧基础工作流</h3>
             <p className="mt-1 text-sm text-muted-foreground">按顺序执行，不要跳步。</p>
           </div>
           <div className="grid gap-4 p-4 md:grid-cols-2">
