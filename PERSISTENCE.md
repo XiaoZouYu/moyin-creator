@@ -39,6 +39,10 @@ npm run dev:web:persistent
 Docker downloads the `postgres:16-alpine` image automatically if it is not
 available locally.
 
+The PostgreSQL container is exposed on host `127.0.0.1:15432` by default for
+local tools. The app container still connects internally to `postgres:5432`.
+Set `POSTGRES_HOST_PORT` in `.env` only if you need a different host port.
+
 ## Server Deployment
 
 Use Docker Compose:

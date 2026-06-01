@@ -8,7 +8,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-moyin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moyin_local_password}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Exposed only for local development tools. The app container uses the
+      # internal Docker service address postgres:5432 and does not need this
+      # host port. Use 15432 by default to avoid conflicts with server PostgreSQL.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
     volumes:
       - moyin-postgres-data:/var/lib/postgresql/data
     healthcheck:
