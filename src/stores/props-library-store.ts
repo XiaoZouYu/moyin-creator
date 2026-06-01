@@ -9,7 +9,7 @@
 
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import { userScopedLocalStorage } from '@/lib/user-session';
+import { fileStorage } from '@/lib/indexed-db-storage';
 
 // 道具项
 export interface PropItem {
@@ -151,7 +151,7 @@ export const usePropsLibraryStore = create<PropsLibraryStore>()(
     }),
     {
       name: 'santi-props-library',
-      storage: createJSONStorage(() => userScopedLocalStorage),
+      storage: createJSONStorage(() => fileStorage),
       partialize: (state) => ({
         items: state.items,
         folders: state.folders,

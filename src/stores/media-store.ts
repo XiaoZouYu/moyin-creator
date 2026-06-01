@@ -260,7 +260,7 @@ export const useMediaStore = create<MediaStore>()(
 
     // Also save to Electron local storage for persistent URL
     // blob: URLs can't be passed to IPC, so we convert File → data: URL → local file
-    if (isElectron() && newItem.file && (newItem.type === 'image' || newItem.type === 'video')) {
+    if (isElectron() && newItem.file && (newItem.type === 'image' || newItem.type === 'video' || newItem.type === 'audio')) {
       (async () => {
         try {
           // Convert File to data: URL (IPC handler supports data: but not blob:)
@@ -271,8 +271,12 @@ export const useMediaStore = create<MediaStore>()(
             reader.readAsDataURL(newItem.file!);
           });
           
-          const category: ImageCategory = newItem.type === 'video' ? 'videos' : 'shots';
-          const ext = newItem.type === 'video' ? '.mp4' : '.png';
+          const category: ImageCategory = newItem.type === 'video'
+            ? 'videos'
+            : newItem.type === 'audio'
+              ? 'audios'
+              : 'shots';
+          const ext = newItem.type === 'video' ? '.mp4' : newItem.type === 'audio' ? '' : '.png';
           const filename = `upload_${newItem.name.replace(/[^a-zA-Z0-9.]/g, '_')}_${Date.now()}${ext}`;
           const localPath = await saveImageToLocal(dataUrl, category, filename);
           

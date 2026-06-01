@@ -6,6 +6,7 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { execFileSync } from 'node:child_process'
 import httpsProxyAgent from 'https-proxy-agent'
+import { handleCloudMediaRequest, handleCloudStorageRequest } from './scripts/cloud-storage.mjs'
 
 const { HttpsProxyAgent } = httpsProxyAgent
 
@@ -254,9 +255,13 @@ function apiCorsProxyPlugin(): Plugin {
     name: 'web-api-cors-proxy',
     configureServer(server) {
       server.middlewares.use('/__api_proxy', handleProxyRequest)
+      server.middlewares.use('/__cloud_storage', handleCloudStorageRequest)
+      server.middlewares.use('/__cloud_media', handleCloudMediaRequest)
     },
     configurePreviewServer(server) {
       server.middlewares.use('/__api_proxy', handleProxyRequest)
+      server.middlewares.use('/__cloud_storage', handleCloudStorageRequest)
+      server.middlewares.use('/__cloud_media', handleCloudMediaRequest)
     },
   }
 }

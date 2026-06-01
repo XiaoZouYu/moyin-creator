@@ -298,6 +298,128 @@ async function webFetch(targetUrl: string, init?: RequestInit): Promise<Response
   return response
 }
 
+let cloudStorageUnavailableUntil = 0
+let cloudMediaUnavailableUntil = 0
+
+function markCloudStorageUnavailable() {
+  cloudStorageUnavailableUntil = Date.now() + 30_000
+}
+
+function markCloudMediaUnavailable() {
+  cloudMediaUnavailableUntil = Date.now() + 30_000
+}
+
+async function fetchCloudJson<T = any>(
+  path: string,
+  init?: RequestInit,
+  options?: { media?: boolean },
+): Promise<T> {
+  const isMedia = !!options?.media
+  if (Date.now() < (isMedia ? cloudMediaUnavailableUntil : cloudStorageUnavailableUntil)) {
+    throw new Error('Cloud persistence API is temporarily unavailable')
+  }
+
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      ...(init?.body ? { 'content-type': 'application/json' } : {}),
+      ...(init?.headers || {}),
+    },
+  })
+  const contentType = response.headers.get('content-type') || ''
+  if (!contentType.includes('application/json')) {
+    if (isMedia) markCloudMediaUnavailable()
+    else markCloudStorageUnavailable()
+    throw new Error('Cloud persistence API did not return JSON')
+  }
+
+  const data = await response.json()
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 503) {
+      if (isMedia) markCloudMediaUnavailable()
+      else markCloudStorageUnavailable()
+    }
+    throw new Error(data?.detail || data?.error || `Cloud persistence API failed: ${response.status}`)
+  }
+
+  return data as T
+}
+
+async function cloudStorageGetItem(key: string): Promise<string | null> {
+  const data = await fetchCloudJson<{ value: string | null }>(`/__cloud_storage/item?key=${encodeURIComponent(key)}`)
+  return data.value ?? null
+}
+
+async function cloudStorageSetItem(key: string, value: string): Promise<boolean> {
+  const data = await fetchCloudJson<{ success: boolean }>('/__cloud_storage/item', {
+    method: 'PUT',
+    body: JSON.stringify({ key, value }),
+  })
+  return !!data.success
+}
+
+async function cloudStorageRemoveItem(key: string): Promise<boolean> {
+  const data = await fetchCloudJson<{ success: boolean }>(`/__cloud_storage/item?key=${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+  })
+  return !!data.success
+}
+
+async function cloudStorageExists(key: string): Promise<boolean> {
+  const data = await fetchCloudJson<{ exists: boolean }>(`/__cloud_storage/exists?key=${encodeURIComponent(key)}`)
+  return !!data.exists
+}
+
+async function cloudStorageListKeys(prefix: string): Promise<string[]> {
+  const data = await fetchCloudJson<{ keys: string[] }>(`/__cloud_storage/keys?prefix=${encodeURIComponent(prefix)}`)
+  return Array.isArray(data.keys) ? data.keys : []
+}
+
+async function cloudStorageListDirs(prefix: string): Promise<string[]> {
+  const data = await fetchCloudJson<{ dirs: string[] }>(`/__cloud_storage/dirs?prefix=${encodeURIComponent(prefix)}`)
+  return Array.isArray(data.dirs) ? data.dirs : []
+}
+
+async function cloudStorageRemoveDir(prefix: string): Promise<boolean> {
+  const data = await fetchCloudJson<{ success: boolean }>(`/__cloud_storage/dir?prefix=${encodeURIComponent(prefix)}`, {
+    method: 'DELETE',
+  })
+  return !!data.success
+}
+
+async function cloudMediaSave(key: string, blob: Blob): Promise<boolean> {
+  const data = await fetchCloudJson<{ success: boolean }>('/__cloud_media/item', {
+    method: 'PUT',
+    body: JSON.stringify({
+      key,
+      mimeType: blob.type || 'application/octet-stream',
+      dataBase64: arrayBufferToBase64(await blob.arrayBuffer()),
+    }),
+  }, { media: true })
+  return !!data.success
+}
+
+async function cloudMediaUrl(key: string): Promise<string | null> {
+  const data = await fetchCloudJson<{ url?: string }>(`/__cloud_media/url?key=${encodeURIComponent(key)}`, undefined, { media: true })
+  return data.url || null
+}
+
+async function cloudMediaBase64(key: string): Promise<{ base64: string; mimeType?: string; size?: number } | null> {
+  const data = await fetchCloudJson<{ base64?: string; mimeType?: string; size?: number }>(
+    `/__cloud_media/base64?key=${encodeURIComponent(key)}`,
+    undefined,
+    { media: true },
+  )
+  return data.base64 ? { base64: data.base64, mimeType: data.mimeType, size: data.size } : null
+}
+
+async function cloudMediaDelete(key: string): Promise<boolean> {
+  const data = await fetchCloudJson<{ success: boolean }>(`/__cloud_media/item?key=${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+  }, { media: true })
+  return !!data.success
+}
+
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer)
   const chunkSize = 0x8000
@@ -331,6 +453,14 @@ async function sourceToBlob(source: string): Promise<Blob> {
   if (source.startsWith('local-image://')) {
     const local = parseLocalMediaUrl(source)
     if (!local) throw new Error('Invalid local media URL')
+    try {
+      const cloud = await cloudMediaBase64(local.key)
+      if (cloud?.base64) {
+        return base64ToBlob(cloud.base64, cloud.mimeType || 'application/octet-stream')
+      }
+    } catch {
+      // Fall back to browser-local media cache.
+    }
     const record = await getMedia(local.key)
     if (!record) throw new Error(`Local media not found: ${source}`)
     return record.blob
@@ -464,17 +594,61 @@ function installFileStorage() {
   if (window.fileStorage) return
 
   window.fileStorage = {
-    getItem: (key) => getKv(key),
-    setItem: (key, value) => setKv(key, value),
-    removeItem: (key) => deleteKv(key),
-    exists: async (key) => (await getKv(key)) !== null,
+    getItem: async (key) => {
+      try {
+        const cloudValue = await cloudStorageGetItem(key)
+        if (cloudValue !== null) {
+          await setKv(key, cloudValue).catch(() => undefined)
+          return cloudValue
+        }
+      } catch {
+        // Fall back to browser-local IndexedDB.
+      }
+      return getKv(key)
+    },
+    setItem: async (key, value) => {
+      await setKv(key, value)
+      try {
+        return await cloudStorageSetItem(key, value)
+      } catch {
+        return true
+      }
+    },
+    removeItem: async (key) => {
+      await deleteKv(key).catch(() => undefined)
+      try {
+        return await cloudStorageRemoveItem(key)
+      } catch {
+        return true
+      }
+    },
+    exists: async (key) => {
+      try {
+        if (await cloudStorageExists(key)) return true
+      } catch {
+        // Fall back to browser-local IndexedDB.
+      }
+      return (await getKv(key)) !== null
+    },
     listKeys: async (prefix) => {
       const normalized = normalizeDirPrefix(prefix)
       const start = normalized ? `${normalized}/` : ''
-      return (await getAllKvKeys()).filter((key) => key.startsWith(start))
+      try {
+        const cloudKeys = await cloudStorageListKeys(normalized)
+        if (cloudKeys.length > 0) return cloudKeys
+      } catch {
+        // Fall back to browser-local IndexedDB.
+      }
+      return (await getAllKvKeys()).filter((key) => key === normalized || key.startsWith(start))
     },
     listDirs: async (prefix) => {
       const normalized = normalizeDirPrefix(prefix)
+      try {
+        const cloudDirs = await cloudStorageListDirs(normalized)
+        if (cloudDirs.length > 0) return cloudDirs
+      } catch {
+        // Fall back to browser-local IndexedDB.
+      }
       const start = normalized ? `${normalized}/` : ''
       const dirs = new Set<string>()
       for (const key of await getAllKvKeys()) {
@@ -489,6 +663,11 @@ function installFileStorage() {
       const start = normalized ? `${normalized}/` : ''
       const keys = await getAllKvKeys()
       await Promise.all(keys.filter((key) => key === normalized || key.startsWith(start)).map(deleteKv))
+      try {
+        await cloudStorageRemoveDir(normalized)
+      } catch {
+        // Local deletion has already succeeded.
+      }
       return true
     },
   }
@@ -518,6 +697,11 @@ function installImageStorage() {
           size: blob.size,
           createdAt: Date.now(),
         })
+        try {
+          await cloudMediaSave(key, blob)
+        } catch (error) {
+          console.warn('[web-platform] Cloud media save failed, using local cache only:', error)
+        }
         return { success: true, localPath: `local-image://${category}/${encodeURIComponent(safeName)}` }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }
@@ -527,12 +711,18 @@ function installImageStorage() {
       const local = parseLocalMediaUrl(localPath)
       if (!local) return localPath
       const record = await getMedia(local.key)
-      if (!record) return null
-      const cached = objectUrlCache.get(local.key)
-      if (cached) return cached
-      const url = URL.createObjectURL(record.blob)
-      objectUrlCache.set(local.key, url)
-      return url
+      if (record) {
+        const cached = objectUrlCache.get(local.key)
+        if (cached) return cached
+        const url = URL.createObjectURL(record.blob)
+        objectUrlCache.set(local.key, url)
+        return url
+      }
+      try {
+        return await cloudMediaUrl(local.key)
+      } catch {
+        return null
+      }
     },
     deleteImage: async (localPath) => {
       const local = parseLocalMediaUrl(localPath)
@@ -540,7 +730,12 @@ function installImageStorage() {
       const cached = objectUrlCache.get(local.key)
       if (cached) URL.revokeObjectURL(cached)
       objectUrlCache.delete(local.key)
-      return deleteMedia(local.key)
+      const localDeleted = await deleteMedia(local.key).catch(() => false)
+      try {
+        return await cloudMediaDelete(local.key)
+      } catch {
+        return localDeleted
+      }
     },
     readAsBase64: async (localPath) => {
       try {

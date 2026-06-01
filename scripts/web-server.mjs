@@ -2,6 +2,7 @@ import { createReadStream, existsSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { extname, join, normalize, resolve, sep } from 'node:path'
+import { handleCloudMediaRequest, handleCloudStorageRequest } from './cloud-storage.mjs'
 
 const PORT = Number(process.env.PORT || 8080)
 const HOST = process.env.HOST || '0.0.0.0'
@@ -214,6 +215,16 @@ async function handleStatic(req, res) {
 const server = createServer((req, res) => {
   if ((req.url || '').startsWith('/__api_proxy')) {
     void handleProxy(req, res)
+    return
+  }
+
+  if ((req.url || '').startsWith('/__cloud_storage')) {
+    void handleCloudStorageRequest(req, res)
+    return
+  }
+
+  if ((req.url || '').startsWith('/__cloud_media')) {
+    void handleCloudMediaRequest(req, res)
     return
   }
 

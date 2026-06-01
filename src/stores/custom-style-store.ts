@@ -10,7 +10,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { registerCustomStyleLookup, type StylePreset } from '@/lib/constants/visual-styles';
-import { userScopedLocalStorage } from '@/lib/user-session';
+import { fileStorage } from '@/lib/indexed-db-storage';
 
 // ==================== Types ====================
 
@@ -184,7 +184,7 @@ export const useCustomStyleStore = create<CustomStyleStore>()(
     }),
     {
       name: 'santi-custom-styles',
-      storage: createJSONStorage(() => userScopedLocalStorage),
+      storage: createJSONStorage(() => fileStorage),
       partialize: (state) => ({
         styles: state.styles,
         folders: state.folders,

@@ -36,7 +36,7 @@ import {
   VOLC_ARK_VIDEO_PLATFORM,
   isVolcArkVideoPlatform,
 } from '@/lib/volc-ark-video';
-import { userScopedLocalStorage } from '@/lib/user-session';
+import { fileStorage } from '@/lib/indexed-db-storage';
 
 // Re-export IProvider for convenience
 export type { IProvider } from '@/lib/api-key-manager';
@@ -1240,7 +1240,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
     }),
     {
       name: 'opencut-api-config',  // localStorage key
-      storage: createJSONStorage(() => userScopedLocalStorage),
+      storage: createJSONStorage(() => fileStorage),
       version: 16,  // v16: split built-in aggregator into auto-vip and add Chunfeng provider
       migrate: (persistedState: unknown, version: number) => {
         // Use mutable result object for chained migration

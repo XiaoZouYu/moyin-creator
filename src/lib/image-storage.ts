@@ -21,7 +21,7 @@ declare global {
   }
 }
 
-export type ImageCategory = 'characters' | 'scenes' | 'shots' | 'wardrobe' | 'videos' | 'styles' | 'props';
+export type ImageCategory = 'characters' | 'scenes' | 'shots' | 'wardrobe' | 'videos' | 'audios' | 'styles' | 'props';
 
 /**
  * Check if running in Electron environment

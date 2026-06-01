@@ -31,6 +31,7 @@ backups/
 # Environment & secrets
 *.env
 *.env.*
+!.env.example
 activation.json
 
 # Backup files

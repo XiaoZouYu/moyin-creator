@@ -3,7 +3,7 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { userScopedLocalStorage } from "@/lib/user-session";
+import { fileStorage } from "@/lib/indexed-db-storage";
 
 export type PanelPreset =
   | "default"
@@ -224,7 +224,7 @@ export const usePanelStore = create<PanelState>()(
     }),
     {
       name: "panel-sizes",
-      storage: createJSONStorage(() => userScopedLocalStorage),
+      storage: createJSONStorage(() => fileStorage),
     }
   )
 );

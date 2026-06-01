@@ -19,8 +19,11 @@ ENV DIST_DIR=/app/dist
 
 WORKDIR /app
 
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --omit=dev
+
 COPY --from=builder --chown=node:node /app/dist ./dist
-COPY --from=builder --chown=node:node /app/scripts/web-server.mjs ./scripts/web-server.mjs
+COPY --from=builder --chown=node:node /app/scripts ./scripts
 
 USER node
 
