@@ -63,6 +63,14 @@ export function getStoredPhone(): string | null {
   return normalizePhone(window.localStorage.getItem(PHONE_STORAGE_KEY));
 }
 
+export function clearCurrentPhone(): void {
+  currentPhone = null;
+  initialized = true;
+
+  if (!canUseWindow()) return;
+  window.localStorage.removeItem(PHONE_STORAGE_KEY);
+}
+
 export function setCurrentPhone(phone: string): string {
   const normalized = normalizePhone(phone);
   if (!normalized) {
@@ -106,6 +114,37 @@ export function getCurrentPhone(): string | null {
 
 export function hasCurrentPhone(): boolean {
   return !!getCurrentPhone();
+}
+
+export function maskPhone(phone: string | null | undefined): string {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return '';
+
+  if (normalized.length <= 6) {
+    return `${normalized.slice(0, 1)}****${normalized.slice(-1)}`;
+  }
+
+  const headLength = normalized.startsWith('+')
+    ? Math.min(4, normalized.length - 4)
+    : Math.min(3, normalized.length - 4);
+  return `${normalized.slice(0, headLength)}****${normalized.slice(-4)}`;
+}
+
+export function getCurrentUrlWithoutPhone(): string {
+  if (!canUseWindow()) return '/';
+
+  const url = new URL(window.location.href);
+  url.searchParams.delete('phone');
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+export function logoutCurrentUser(): void {
+  clearCurrentPhone();
+
+  if (!canUseWindow()) return;
+
+  window.history.replaceState({}, '', getCurrentUrlWithoutPhone());
+  window.location.reload();
 }
 
 export function getUserStorageSegment(): string {

@@ -29,7 +29,12 @@ import {
   isAutoVipPlatform,
   isChunfengPlatform,
 } from "@/lib/ai/provider-platforms";
-import { clearCurrentUserLocalStorageData } from "@/lib/user-session";
+import {
+  clearCurrentUserLocalStorageData,
+  getCurrentPhone,
+  logoutCurrentUser,
+  maskPhone,
+} from "@/lib/user-session";
 import { AddProviderDialog, EditProviderDialog, FeatureBindingPanel } from "@/components/api-manager";
 import { AddImageHostDialog } from "@/components/image-host-manager/AddImageHostDialog";
 import { EditImageHostDialog } from "@/components/image-host-manager/EditImageHostDialog";
@@ -69,7 +74,6 @@ import {
   Loader2,
   MessageSquare,
   Zap,
-  ScanEye,
   Info,
   Image,
   RotateCcw,
@@ -82,6 +86,8 @@ import {
   Download,
   RefreshCw,
   Upload,
+  LogOut,
+  User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -157,6 +163,8 @@ export function SettingsPanel() {
     () => imageHostProviders.filter(isVisibleImageHostProvider),
     [imageHostProviders],
   );
+  const currentPhone = getCurrentPhone();
+  const maskedCurrentPhone = useMemo(() => maskPhone(currentPhone), [currentPhone]);
 
   useEffect(() => {
     let cancelled = false;
@@ -394,7 +402,7 @@ export function SettingsPanel() {
       assignCharactersToProject(activeProjectId);
     }
     // Rehydrate to load/unload other projects' data
-    try { await useCharacterLibraryStore.persist.rehydrate(); } catch {}
+    try { await useCharacterLibraryStore.persist.rehydrate(); } catch { /* ignore rehydrate failures */ }
   };
 
   const handleToggleShareScenes = async (checked: boolean) => {
@@ -402,7 +410,7 @@ export function SettingsPanel() {
     if (!checked && activeProjectId) {
       assignScenesToProject(activeProjectId);
     }
-    try { await useSceneStore.persist.rehydrate(); } catch {}
+    try { await useSceneStore.persist.rehydrate(); } catch { /* ignore rehydrate failures */ }
   };
 
   const handleToggleShareMedia = async (checked: boolean) => {
@@ -410,7 +418,7 @@ export function SettingsPanel() {
     if (!checked && activeProjectId) {
       assignMediaToProject(activeProjectId);
     }
-    try { await useMediaStore.persist.rehydrate(); } catch {}
+    try { await useMediaStore.persist.rehydrate(); } catch { /* ignore rehydrate failures */ }
   };
 
   // Unified storage handlers
@@ -1237,6 +1245,54 @@ export function SettingsPanel() {
                 <p className="text-sm text-muted-foreground mt-1">
                   设置资源共享策略、存储位置与缓存管理
                 </p>
+              </div>
+
+              <div className="p-6 border border-border rounded-xl bg-card">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-start gap-3">
+                    <div className="p-2 rounded-lg bg-primary/10 text-primary mt-0.5">
+                      <User className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-foreground">当前账户</h4>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        手机号：
+                        <span className="font-mono text-foreground">
+                          {maskedCurrentPhone || "未登录"}
+                        </span>
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        退出后会返回手机号输入页面，项目、配置和素材数据都会保留。
+                      </p>
+                    </div>
+                  </div>
+
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button variant="destructive" size="sm" className="w-full sm:w-auto">
+                        <LogOut className="h-4 w-4" />
+                        退出当前账户
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>退出当前账户</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          将清除当前浏览器保存的手机号并移除地址栏 phone 参数，刷新后回到手机号输入页面。项目、配置和素材数据不会被删除。
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>取消</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={logoutCurrentUser}
+                          className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                        >
+                          确认退出
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
               </div>
 
               {!hasStorageManager && (
