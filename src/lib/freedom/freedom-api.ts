@@ -1438,6 +1438,19 @@ async function toUploadHttpUrl(file: FreedomVideoUploadFile): Promise<string> {
   }
 }
 
+async function toVolcImageInputUrl(file: FreedomVideoUploadFile): Promise<string> {
+  try {
+    return await mediaUrlToDataUrl(file.dataUrl);
+  } catch (error) {
+    console.error('[Freedom] Volc video image conversion failed', {
+      role: file.role,
+      fileName: file.fileName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
 function dataUrlToBlob(dataUrl: string, mimeHint?: string): Blob {
   const match = dataUrl.match(/^data:(.*?);base64,(.*)$/);
   if (!match) throw new Error('上传文件格式无效，必须是 data URL 或 http(s) URL');
@@ -1810,16 +1823,16 @@ async function generateVideoViaVolc(
   const grouped = groupVideoUploadFiles(params.uploadFiles);
   const primaryFile = grouped.single || grouped.first;
   if (primaryFile) {
-    const url = await toUploadHttpUrl(primaryFile);
+    const url = await toVolcImageInputUrl(primaryFile);
     content.push({ type: 'image_url', image_url: { url }, role: 'first_frame' });
   }
   if (grouped.last) {
-    const url = await toUploadHttpUrl(grouped.last);
+    const url = await toVolcImageInputUrl(grouped.last);
     content.push({ type: 'image_url', image_url: { url }, role: 'last_frame' });
   }
   const remainingImageSlots = Math.max(0, 9 - content.filter((item) => item.type === 'image_url').length);
   for (const reference of grouped.references.slice(0, remainingImageSlots)) {
-    const url = await toUploadHttpUrl(reference);
+    const url = await toVolcImageInputUrl(reference);
     content.push({ type: 'image_url', image_url: { url }, role: 'reference_image' });
   }
 

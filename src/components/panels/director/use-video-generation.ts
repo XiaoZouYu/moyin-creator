@@ -4,7 +4,7 @@
 import { getFeatureConfig } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
 import { saveVideoToLocal } from "@/lib/image-storage";
-import { resolveImageToHttpUrl } from "@/lib/media-url-resolver";
+import { mediaUrlToDataUrl, resolveImageToHttpUrl } from "@/lib/media-url-resolver";
 import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
@@ -807,9 +807,10 @@ async function callVolcVideoApi(
   // 图片内容（首帧/尾帧）
   for (const img of imageWithRoles) {
     if (img.url) {
+      const imageUrl = await mediaUrlToDataUrl(img.url);
       content.push({
         type: 'image_url',
-        image_url: { url: img.url },
+        image_url: { url: imageUrl },
         role: img.role,
       });
     }
@@ -857,6 +858,7 @@ async function callVolcVideoApi(
     aspectRatio,
     duration,
     imageCount: imageWithRoles.filter(i => i.url).length,
+    imageInputMode: imageWithRoles.some(i => i.url) ? 'base64_data_uri' : 'none',
   });
 
   const submitResponse = await corsFetch(taskUrls.submit, {
