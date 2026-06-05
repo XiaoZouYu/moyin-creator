@@ -23,7 +23,8 @@ import { useProjectStore } from "@/stores/project-store";
 import { getFeatureConfig, getFeatureNotConfiguredMessage } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
 import { submitGridImageRequest } from "@/lib/ai/image-generator";
-import { readImageAsBase64, saveImageToLocal } from "@/lib/image-storage";
+import { saveImageToLocal } from "@/lib/image-storage";
+import { prepareImageReferencesForApi } from "@/lib/media-url-resolver";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -791,20 +792,12 @@ async function generateVariationImage(params: {
  */
 async function resolveImageToBase64(url: string): Promise<string | null> {
   if (!url) return null;
-  // Already base64
-  if (url.startsWith('data:image/')) return url;
-  // HTTP URL — pass through (API can fetch it)
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
-  // local-image:// protocol
-  if (url.startsWith('local-image://')) {
-    try {
-      return await readImageAsBase64(url) || null;
-    } catch {
-      console.warn('[Wardrobe] Failed to read local image:', url);
-      return null;
-    }
-  }
-  return null;
+  const [resolved] = await prepareImageReferencesForApi([url], {
+    maxCount: 1,
+    requireBase64DataUrl: true,
+    logPrefix: 'Wardrobe',
+  });
+  return resolved || null;
 }
 
 /**

@@ -25,7 +25,7 @@ import {
   resolveProviderImageApiFormat,
 } from '@/lib/ai/provider-platforms';
 import { corsFetch } from '@/lib/cors-fetch';
-import { readImageAsBase64 } from '@/lib/image-storage';
+import { mediaUrlToBlob, mediaUrlToDataUrl, resolveImageToHttpUrl } from '@/lib/media-url-resolver';
 import { uploadBase64Image } from '@/lib/utils/image-upload';
 import { isVeoModel, resolveVeoUploadCapability } from '@/lib/freedom/veo-capability';
 import { type AIFeature, useAPIConfigStore } from '@/stores/api-config-store';
@@ -295,19 +295,19 @@ async function resolveFreedomImageReferences(
 
     let inputUrl = ref.url;
     if (options.forceDataUrl && !ref.url.startsWith('data:image/')) {
-      inputUrl = await readImageAsBase64(ref.url) || ref.url;
+      inputUrl = await mediaUrlToDataUrl(ref.url);
     } else if (!/^https?:\/\//i.test(ref.url) && !ref.url.startsWith('data:image/')) {
-      inputUrl = await readImageAsBase64(ref.url) || ref.url;
+      inputUrl = await mediaUrlToDataUrl(ref.url);
     }
 
     if (options.preferHttpUrl && !/^https?:\/\//i.test(inputUrl)) {
-      const dataUrl = inputUrl.startsWith('data:image/') ? inputUrl : await readImageAsBase64(inputUrl);
-      if (dataUrl) {
-        try {
-          inputUrl = await uploadBase64Image(dataUrl);
-        } catch (error) {
-          console.warn('[Freedom] Failed to upload reference image, falling back to original input:', error);
-        }
+      try {
+        inputUrl = await resolveImageToHttpUrl(inputUrl, {
+          uploadName: ref.name,
+          logPrefix: 'Freedom',
+        });
+      } catch (error) {
+        console.warn('[Freedom] Failed to upload reference image, falling back to original input:', error);
       }
     }
 
@@ -1442,9 +1442,7 @@ function dataUrlToBlob(dataUrl: string, mimeHint?: string): Blob {
 
 async function toUploadBlob(file: FreedomVideoUploadFile): Promise<Blob> {
   if (/^https?:\/\//i.test(file.dataUrl)) {
-    const resp = await fetch(file.dataUrl);
-    if (!resp.ok) throw new Error(`无法下载上传素材：${resp.status}`);
-    return resp.blob();
+    return mediaUrlToBlob(file.dataUrl);
   }
   return dataUrlToBlob(file.dataUrl, file.mimeType);
 }

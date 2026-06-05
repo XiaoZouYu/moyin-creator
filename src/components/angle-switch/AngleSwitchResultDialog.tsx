@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Check, X, RotateCw, Download } from "lucide-react";
+import { mediaUrlToBlob } from "@/lib/media-url-resolver";
 
 export interface AngleSwitchResult {
   originalImage: string;
@@ -71,8 +72,7 @@ export function AngleSwitchResultDialog({
 
   const handleDownload = async (imageUrl: string, filename: string) => {
     try {
-      const response = await fetch(imageUrl);
-      const blob = await response.blob();
+      const blob = await mediaUrlToBlob(imageUrl);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;

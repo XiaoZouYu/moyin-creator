@@ -9,7 +9,7 @@
 import type { Shot } from "@/types/script";
 import type { ScriptData } from "@/types/script";
 import type { SplitScene } from '@/stores/director-store';
-import { readImageAsBase64 } from '@/lib/image-storage';
+import { mediaUrlToBlob } from '@/lib/media-url-resolver';
 
 export interface ExportManifest {
   version: string;
@@ -89,27 +89,7 @@ export interface ExportProgress {
  */
 async function downloadFile(url: string): Promise<Blob> {
   if (!url) throw new Error('Empty URL');
-
-  // local-image:// protocol (Electron local storage) → read via IPC then convert
-  if (url.startsWith('local-image://')) {
-    const base64 = await readImageAsBase64(url);
-    if (!base64) throw new Error(`Failed to read local file: ${url}`);
-    const resp = await fetch(base64);
-    return resp.blob();
-  }
-
-  // data: URLs
-  if (url.startsWith('data:')) {
-    const resp = await fetch(url);
-    return resp.blob();
-  }
-
-  // Standard HTTP(S) fetch
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to download: ${response.status}`);
-  }
-  return response.blob();
+  return mediaUrlToBlob(url);
 }
 
 /**

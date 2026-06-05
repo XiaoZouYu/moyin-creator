@@ -8,7 +8,7 @@
  */
 
 import { uploadToImageHost, isImageHostConfigured } from '@/lib/image-host';
-import { readImageAsBase64 } from '@/lib/image-storage';
+import { mediaUrlToDataUrl } from '@/lib/media-source';
 
 /**
  * Upload base64 image and get HTTP URL
@@ -25,11 +25,7 @@ export async function uploadBase64Image(imageData: string): Promise<string> {
 
   // Handle local-image:// paths - convert to base64 first
   if (imageData.startsWith('local-image://')) {
-    const converted = await readImageAsBase64(imageData);
-    if (!converted) {
-      throw new Error(`无法读取本地图片: ${imageData}`);
-    }
-    base64Data = converted;
+    base64Data = await mediaUrlToDataUrl(imageData);
   }
 
   // Validate base64 data

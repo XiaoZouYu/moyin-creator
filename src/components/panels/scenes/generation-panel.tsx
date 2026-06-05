@@ -25,7 +25,8 @@ import { generateSceneImage as generateSceneImageAPI, submitGridImageRequest } f
 import { generateContactSheetPrompt, generateMultiPageContactSheetData, type SceneViewpoint } from "@/lib/script/scene-viewpoint-generator";
 import type { PendingViewpointData, ContactSheetPromptSet } from "@/stores/media-panel-store";
 import { splitStoryboardImage } from "@/lib/storyboard/image-splitter";
-import { saveImageToLocal, readImageAsBase64 } from "@/lib/image-storage";
+import { saveImageToLocal } from "@/lib/image-storage";
+import { mediaUrlToDataUrl, prepareImageReferencesForApi } from "@/lib/media-url-resolver";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -931,14 +932,7 @@ ${gridItemsZh}
       let finalImageUrl = result.imageUrl;
       if (finalImageUrl.startsWith('http://') || finalImageUrl.startsWith('https://')) {
         try {
-          const resp = await fetch(finalImageUrl);
-          const blob = await resp.blob();
-          finalImageUrl = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-          });
+          finalImageUrl = await mediaUrlToDataUrl(finalImageUrl);
           console.log('[ContactSheet] HTTP→base64 转换成功');
         } catch (e) {
           console.warn('[ContactSheet] HTTP→base64 转换失败，使用原URL');
@@ -1157,14 +1151,7 @@ ${gridItemsZh}
       if (contactSheetImage.startsWith('http://') || contactSheetImage.startsWith('https://')) {
         console.log('[Split] HTTP URL 检测到，转换为 base64...');
         try {
-          const resp = await fetch(contactSheetImage);
-          const blob = await resp.blob();
-          imageForSplit = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-          });
+          imageForSplit = await mediaUrlToDataUrl(contactSheetImage);
           console.log('[Split] HTTP→base64 转换成功');
         } catch (convertErr) {
           console.warn('[Split] HTTP→base64 转换失败，使用原URL:', convertErr);
@@ -1641,14 +1628,7 @@ ${gridItemsZh}
         if (generatedImageUrl.startsWith('http://') || generatedImageUrl.startsWith('https://')) {
           console.log('[AutoContactSheet] HTTP URL 检测到，转换为 base64...');
           try {
-            const resp = await fetch(generatedImageUrl);
-            const blob = await resp.blob();
-            imageForSplit = await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result as string);
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            });
+            imageForSplit = await mediaUrlToDataUrl(generatedImageUrl);
             console.log('[AutoContactSheet] HTTP→base64 转换成功，长度:', imageForSplit.length);
           } catch (convertErr) {
             console.warn('[AutoContactSheet] HTTP→base64 转换失败，使用原URL:', convertErr);
@@ -1992,16 +1972,10 @@ No characters, empty environment.`;
           rawReferenceImages.push(childScene.referenceImage);
         }
 
-        // 将 local-image:// 转换为 base64 以传给 API
-        const referenceImages: string[] = [];
-        for (const ref of rawReferenceImages) {
-          if (ref.startsWith('local-image://')) {
-            const base64 = await readImageAsBase64(ref);
-            if (base64) referenceImages.push(base64);
-          } else {
-            referenceImages.push(ref);
-          }
-        }
+        const referenceImages = await prepareImageReferencesForApi(rawReferenceImages, {
+          requireBase64DataUrl: true,
+          logPrefix: '批量四视图',
+        });
 
         // 生成图片
         const result = await generateSceneImageAPI({
@@ -2251,16 +2225,10 @@ ${anchor} 的背面直视镜头。展示后部结构。背景是物体面向的�
         console.log('[Orthographic] 添加子场景图片作为辅助参考');
       }
 
-      // 将 local-image:// 转换为 base64 以传给 API
-      const referenceImages: string[] = [];
-      for (const ref of rawRefs) {
-        if (ref.startsWith('local-image://')) {
-          const base64 = await readImageAsBase64(ref);
-          if (base64) referenceImages.push(base64);
-        } else {
-          referenceImages.push(ref);
-        }
-      }
+      const referenceImages = await prepareImageReferencesForApi(rawRefs, {
+        requireBase64DataUrl: true,
+        logPrefix: 'Orthographic',
+      });
 
       const result = await generateSceneImageAPI({
         prompt: orthographicPrompt,

@@ -36,6 +36,7 @@ import { toast } from "sonner";
 import { WardrobeModal } from "./wardrobe-modal";
 import { LocalImage } from "@/components/ui/local-image";
 import { ImagePreviewModal } from "@/components/panels/director/media-preview-modal";
+import { mediaUrlToBlob } from "@/lib/media-url-resolver";
 
 // View type labels
 const VIEW_LABELS: Record<string, string> = {
@@ -130,27 +131,8 @@ export function CharacterDetail({ character }: CharacterDetailProps) {
 
   const handleExportImage = async (imageUrl: string, name: string) => {
     try {
-      let blob: Blob;
-      
-      // Handle different URL formats
-      if (imageUrl.startsWith('data:')) {
-        // Base64 data URL
-        const res = await fetch(imageUrl);
-        blob = await res.blob();
-      } else if (imageUrl.startsWith('local-image://')) {
-        // Local image protocol - fetch through Electron's custom protocol
-        const res = await fetch(imageUrl);
-        blob = await res.blob();
-      } else if (imageUrl.startsWith('http')) {
-        // Remote URL
-        const res = await fetch(imageUrl);
-        blob = await res.blob();
-      } else {
-        // Fallback
-        const res = await fetch(imageUrl);
-        blob = await res.blob();
-      }
-      
+      const blob = await mediaUrlToBlob(imageUrl);
+
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;

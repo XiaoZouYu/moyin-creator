@@ -45,6 +45,7 @@ import {
   SEEDANCE_LIMITS,
   type GroupPromptResult,
 } from "./sclass-prompt-builder";
+import { resolveMediaReferenceToHttpUrl } from "@/lib/media-url-resolver";
 
 // ==================== Types ====================
 
@@ -313,16 +314,33 @@ export function useSClassGeneration() {
         const videoRefUrls: string[] = [];
         // 前组视频衔接（链式重试时传入）— 延长/编辑组已在 refs.videos 中携带 sourceVideoUrl，跳过
         if (!isExtendOrEdit && options?.prevVideoUrl) {
-          const prevHttpUrl = await convertToHttpUrl(options.prevVideoUrl).catch(() => "");
+          const prevHttpUrl = await resolveMediaReferenceToHttpUrl(options.prevVideoUrl, {
+            mediaKind: 'video',
+            label: '前组视频引用',
+            logPrefix: 'SClassGen',
+          }).catch((error) => {
+            console.warn('[SClassGen] 前组视频不是可远程访问的 HTTP URL，已跳过衔接引用:', error);
+            return "";
+          });
           if (prevHttpUrl) videoRefUrls.push(prevHttpUrl);
         }
         for (const vRef of promptResult.refs.videos) {
-          const httpUrl = vRef.httpUrl || (await convertToHttpUrl(vRef.localUrl).catch(() => ""));
+          const httpUrl = await resolveMediaReferenceToHttpUrl(vRef.localUrl, {
+            fallbackHttpUrl: vRef.httpUrl,
+            mediaKind: 'video',
+            label: `${vRef.tag || '视频引用'}（${vRef.fileName || '未命名'}）`,
+            logPrefix: 'SClassGen',
+          });
           if (httpUrl) videoRefUrls.push(httpUrl);
         }
         const audioRefUrls: string[] = [];
         for (const aRef of promptResult.refs.audios) {
-          const httpUrl = aRef.httpUrl || (await convertToHttpUrl(aRef.localUrl).catch(() => ""));
+          const httpUrl = await resolveMediaReferenceToHttpUrl(aRef.localUrl, {
+            fallbackHttpUrl: aRef.httpUrl,
+            mediaKind: 'audio',
+            label: `${aRef.tag || '音频引用'}（${aRef.fileName || '未命名'}）`,
+            logPrefix: 'SClassGen',
+          });
           if (httpUrl) audioRefUrls.push(httpUrl);
         }
 

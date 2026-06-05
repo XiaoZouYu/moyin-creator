@@ -25,6 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { mediaUrlToBlob } from "@/lib/media-url-resolver";
 import {
   Check,
   X,
@@ -70,8 +71,7 @@ export function QuadGridResultDialog({
 
   const handleDownload = async (imageUrl: string, index: number) => {
     try {
-      const response = await fetch(imageUrl);
-      const blob = await response.blob();
+      const blob = await mediaUrlToBlob(imageUrl);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;

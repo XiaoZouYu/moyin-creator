@@ -78,6 +78,7 @@ import { usePreviewStore } from "@/stores/preview-store";
 import { CharacterSelector } from "../director/character-selector";
 import { SceneLibrarySelector } from "../director/scene-library-selector";
 import { MediaLibrarySelector } from "../director/media-library-selector";
+import { mediaUrlToBlob } from "@/lib/media-url-resolver";
 import { EditableTextField } from "../director/editable-text-field";
 import { useResolvedImageUrl } from "@/hooks/use-resolved-image-url";
 
@@ -255,18 +256,8 @@ export function SClassSceneCard({
   // 下载图片
   const handleDownloadImage = async (imageUrl: string, filename: string) => {
     try {
-      let blob: Blob;
-      if (imageUrl.startsWith('data:')) {
-        const res = await fetch(imageUrl);
-        blob = await res.blob();
-      } else if (imageUrl.startsWith('http')) {
-        const res = await fetch(imageUrl);
-        blob = await res.blob();
-      } else {
-        const res = await fetch(imageUrl);
-        blob = await res.blob();
-      }
-      
+      const blob = await mediaUrlToBlob(imageUrl);
+
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;

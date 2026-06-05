@@ -20,6 +20,7 @@ import {
   resolveProviderImageApiFormat,
 } from '@/lib/ai/provider-platforms';
 import { getUserScopedMediaCategory } from '@/lib/user-session';
+import { mediaUrlToBlob, mediaUrlToDataUrl } from '@/lib/media-url-resolver';
 
 export interface ImageGenerationParams {
   prompt: string;
@@ -238,11 +239,7 @@ function extensionFromMimeType(mimeType: string): string {
 
 async function imageReferenceToBlob(value: string, index: number): Promise<{ blob: Blob; filename: string }> {
   const input = normalizeInputImageReference(value);
-  const response = await fetch(input);
-  if (!response.ok) {
-    throw new Error(`无法读取参考图 #${index + 1}: ${response.status}`);
-  }
-  const blob = await response.blob();
+  const blob = await mediaUrlToBlob(input);
   if (blob.size === 0) {
     throw new Error(`参考图 #${index + 1} 为空`);
   }
@@ -2039,39 +2036,6 @@ export async function imageUrlToBase64(url: string): Promise<string> {
       console.warn('[ImageGenerator] Local save failed, falling back to base64:', error);
     }
   }
-  
-  // Fallback to base64 for non-Electron environments
-  const convertBlobToBase64 = (blob: Blob): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  };
-  
-  // Try direct fetch first
-  try {
-    const response = await fetch(url, { mode: 'cors' });
-    if (response.ok) {
-      const blob = await response.blob();
-      return await convertBlobToBase64(blob);
-    }
-  } catch (error) {
-    console.warn('[ImageGenerator] Direct fetch failed, trying proxy:', error);
-  }
-  
-  // Fallback: use our API proxy to fetch the image
-  try {
-    const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(url)}`;
-    const response = await fetch(proxyUrl);
-    if (!response.ok) {
-      throw new Error(`Proxy fetch failed: ${response.status}`);
-    }
-    const blob = await response.blob();
-    return await convertBlobToBase64(blob);
-  } catch (error) {
-    console.warn('[ImageGenerator] Proxy fetch also failed:', error);
-    throw error;
-  }
+
+  return mediaUrlToDataUrl(url);
 }

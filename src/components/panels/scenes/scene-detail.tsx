@@ -16,7 +16,7 @@ import {
   ATMOSPHERE_PRESETS,
 } from "@/stores/scene-store";
 import { useResolvedImageUrl } from "@/hooks/use-resolved-image-url";
-import { readImageAsBase64 } from "@/lib/image-storage";
+import { mediaUrlToDataUrl } from "@/lib/media-url-resolver";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -134,12 +134,12 @@ export function SceneDetail({ scene }: SceneDetailProps) {
       let href = scene.referenceImage;
       // local-image:// 需要先转为 base64 才能导出
       if (href.startsWith('local-image://')) {
-        const base64 = await readImageAsBase64(href);
-        if (!base64) {
+        try {
+          href = await mediaUrlToDataUrl(href);
+        } catch {
           toast.error("无法读取本地图片");
           return;
         }
-        href = base64;
       }
       const link = document.createElement("a");
       link.href = href;

@@ -12,6 +12,7 @@
 
 import type { AspectRatio, Resolution, GridConfig } from './grid-calculator';
 import { calculateGrid } from './grid-calculator';
+import { isHttpMediaUrl, mediaUrlToDataUrl } from '@/lib/media-source';
 
 // ==================== Types ====================
 
@@ -54,13 +55,17 @@ export interface SplitConfig {
 /**
  * Load an image from a Data URL or URL source
  */
-export function loadImage(src: string): Promise<HTMLImageElement> {
+export async function loadImage(src: string): Promise<HTMLImageElement> {
+  const imageSource = isHttpMediaUrl(src) || src.startsWith('local-image://')
+    ? await mediaUrlToDataUrl(src)
+    : src;
+
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
     img.onerror = (e) => reject(new Error(`Failed to load image: ${e}`));
-    img.src = src;
+    img.src = imageSource;
   });
 }
 

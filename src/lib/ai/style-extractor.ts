@@ -4,7 +4,7 @@
 
 import { getFeatureConfig } from '@/lib/ai/feature-router';
 import { corsFetch } from '@/lib/cors-fetch';
-import { readImageAsBase64 } from '@/lib/image-storage';
+import { mediaUrlToDataUrl } from '@/lib/media-url-resolver';
 import { retryOperation } from '@/lib/utils/retry';
 
 export interface StyleExtractionResult {
@@ -68,8 +68,7 @@ function buildEndpoint(baseUrl: string, path: string): string {
 
 async function resolveImageUrl(src: string): Promise<string> {
   if (src.startsWith('data:')) return src;
-  const dataUrl = await readImageAsBase64(src);
-  return dataUrl || src;
+  return mediaUrlToDataUrl(src);
 }
 
 function extractErrorMessage(status: number, errorText: string): string {

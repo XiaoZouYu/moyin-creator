@@ -17,6 +17,7 @@ import type { SplitScene } from '@/stores/director-store';
 import type { Character } from '@/stores/character-library-store';
 import type { Scene } from '@/stores/scene-store';
 import type { ShotGroup, AssetRef, AssetPurpose, SClassAspectRatio, SClassResolution, SClassDuration, EditType } from '@/stores/sclass-store';
+import { isHttpMediaUrl, mediaUrlToDataUrl } from '@/lib/media-source';
 
 // ==================== Types ====================
 
@@ -133,14 +134,19 @@ export async function mergeToGridImage(
   const totalHeight = cellHeight * rows;
 
   // 加载所有图片
-  const loadImage = (src: string): Promise<HTMLImageElement> =>
-    new Promise((resolve, reject) => {
+  const loadImage = async (src: string): Promise<HTMLImageElement> => {
+    const imageSource = isHttpMediaUrl(src) || src.startsWith('local-image://')
+      ? await mediaUrlToDataUrl(src)
+      : src;
+
+    return new Promise((resolve, reject) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => resolve(img);
       img.onerror = () => reject(new Error(`加载图片失败: ${src.substring(0, 60)}...`));
-      img.src = src;
+      img.src = imageSource;
     });
+  };
 
   const images = await Promise.all(imageUrls.map(loadImage));
 

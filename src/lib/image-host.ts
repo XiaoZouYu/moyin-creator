@@ -8,6 +8,8 @@
 
 import { useAPIConfigStore, type ImageHostProvider } from '@/stores/api-config-store';
 import { ApiKeyManager, parseApiKeys } from '@/lib/api-key-manager';
+import { corsFetch } from '@/lib/cors-fetch';
+import { mediaUrlToBlob, mediaUrlToDataUrl } from '@/lib/media-source';
 
 // ==================== Types ====================
 
@@ -112,21 +114,20 @@ function base64ToBlob(base64Data: string, mimeType = 'image/png'): Blob {
   return new Blob([bytes], { type: mimeType });
 }
 
+function isReadableMediaSource(value: string): boolean {
+  return (
+    isHttpUrl(value) ||
+    value.startsWith('data:') ||
+    value.startsWith('blob:') ||
+    value.startsWith('local-image://')
+  );
+}
+
 async function toUploadFile(imageData: string, name?: string): Promise<{ blob: Blob; filename: string }> {
   let blob: Blob;
 
-  if (isHttpUrl(imageData)) {
-    const response = await fetch(imageData);
-    if (!response.ok) {
-      throw new Error(`下载图片失败: ${response.status}`);
-    }
-    blob = await response.blob();
-  } else if (imageData.startsWith('data:')) {
-    const commaIndex = imageData.indexOf(',');
-    const header = commaIndex >= 0 ? imageData.slice(0, commaIndex) : '';
-    const payload = commaIndex >= 0 ? imageData.slice(commaIndex + 1) : imageData;
-    const mimeType = header.match(/^data:([^;,]+)/)?.[1] || 'image/png';
-    blob = base64ToBlob(payload, mimeType);
+  if (isReadableMediaSource(imageData)) {
+    blob = await mediaUrlToBlob(imageData);
   } else {
     blob = base64ToBlob(imageData, 'image/png');
   }
@@ -138,24 +139,10 @@ async function toUploadFile(imageData: string, name?: string): Promise<{ blob: B
 }
 
 async function toBase64Data(imageData: string): Promise<string> {
-  // If it's a URL, fetch and convert
-  if (isHttpUrl(imageData)) {
-    const response = await fetch(imageData);
-    const blob = await response.blob();
-    const reader = new FileReader();
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
+  if (isReadableMediaSource(imageData)) {
+    const dataUrl = await mediaUrlToDataUrl(imageData);
     const parts = dataUrl.split(',');
     return parts.length === 2 ? parts[1] : dataUrl;
-  }
-
-  // Data URI -> strip prefix
-  if (imageData.startsWith('data:')) {
-    const parts = imageData.split(',');
-    return parts.length === 2 ? parts[1] : imageData;
   }
 
   // Assume already base64
@@ -219,7 +206,7 @@ async function uploadWithProvider(
       headers[provider.apiKeyHeader] = apiKey;
     }
 
-    const response = await fetch(url.toString(), {
+    const response = await corsFetch(url.toString(), {
       method: 'POST',
       headers,
       body: formData,

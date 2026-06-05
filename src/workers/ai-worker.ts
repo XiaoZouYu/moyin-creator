@@ -18,6 +18,7 @@ import type {
 import type { AIScreenplay, AIScene, GenerationConfig, AICharacter, CharacterBibleLike } from '@opencut/ai-core';
 import { PromptCompiler } from '@opencut/ai-core/services/prompt-compiler';
 import { TaskPoller } from '@opencut/ai-core/api/task-poller';
+import { mediaUrlToBlob } from '@/lib/media-source';
 
 const WORKER_VERSION = '0.3.1';
 
@@ -418,11 +419,7 @@ async function pollTaskCompletion(
  * Helper: Download URL content as Blob
  */
 async function fetchAsBlob(url: string): Promise<Blob> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to download: ${response.status}`);
-  }
-  return await response.blob();
+  return mediaUrlToBlob(url);
 }
 
 async function handleExecuteScene(command: ExecuteSceneCommand): Promise<void> {

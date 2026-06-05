@@ -65,8 +65,9 @@ import { useAPIConfigStore } from "@/stores/api-config-store";
 import { parseApiKeys } from "@/lib/api-key-manager";
 import { getFeatureConfig, getFeatureNotConfiguredMessage } from "@/lib/ai/feature-router";
 import { submitGridImageRequest } from "@/lib/ai/image-generator";
-import { uploadToImageHost, isImageHostConfigured } from "@/lib/image-host";
-import { saveVideoToLocal, readImageAsBase64 } from '@/lib/image-storage';
+import { isImageHostConfigured } from "@/lib/image-host";
+import { saveVideoToLocal } from '@/lib/image-storage';
+import { mediaUrlToDataUrl, prepareImageReferencesForApi, resolveImageToHttpUrl } from '@/lib/media-url-resolver';
 import { callVideoGenerationApi, extractLastFrameFromVideo, isContentModerationError } from './use-video-generation';
 import { persistSceneImage } from '@/lib/utils/image-persist';
 import {
@@ -601,7 +602,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
     }
 
     setIsExtractingFrame(true);
-    
+
     try {
       // 提取最后一帧
       const lastFrameBase64 = await extractLastFrameFromVideo(scene.videoUrl, 0.1);
@@ -906,28 +907,10 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
     referenceImages: string[],
     logPrefix: string,
   ): Promise<string[]> => {
-    const processedRefs: string[] = [];
-
-    for (const url of referenceImages) {
-      if (!url) continue;
-
-      if (url.startsWith('http://') || url.startsWith('https://')) {
-        processedRefs.push(url);
-      } else if (url.startsWith('data:image/') && url.includes(';base64,')) {
-        processedRefs.push(url);
-      } else if (url.startsWith('local-image://')) {
-        try {
-          const base64 = await readImageAsBase64(url);
-          if (base64 && base64.startsWith('data:image/') && base64.includes(';base64,')) {
-            processedRefs.push(base64);
-          }
-        } catch (error) {
-          console.warn(`${logPrefix} Failed to read local image:`, url, error);
-        }
-      }
-    }
-
-    return processedRefs;
+    return prepareImageReferencesForApi(referenceImages, {
+      requireBase64DataUrl: true,
+      logPrefix,
+    });
   }, []);
   // Handle quad grid click
   const handleQuadGridClick = useCallback((sceneId: number, type: "start" | "end") => {
@@ -1099,23 +1082,11 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         refs.push(scene.sceneReferenceImage);
       }
 
-      // Process refs for API
-      const processedRefs: string[] = [];
-      for (const url of refs.slice(0, 14)) {
-        if (!url) continue;
-        if (url.startsWith('http://') || url.startsWith('https://')) {
-          processedRefs.push(url);
-        } else if (url.startsWith('data:image/') && url.includes(';base64,')) {
-          processedRefs.push(url);
-        } else if (url.startsWith('local-image://')) {
-          try {
-            const base64 = await readImageAsBase64(url);
-            if (base64) processedRefs.push(base64);
-          } catch (e) {
-            console.warn('[QuadGrid] Failed to read local image:', url);
-          }
-        }
-      }
+      const processedRefs = await prepareImageReferencesForApi(refs, {
+        maxCount: 14,
+        requireBase64DataUrl: true,
+        logPrefix: 'QuadGrid',
+      });
 
       // Parse result helper（用于轮询阶段）
       const normalizeUrl = (url: any): string | undefined => {
@@ -1187,6 +1158,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       console.log('[QuadGrid] Grid image URL:', gridImageUrl.substring(0, 80));
 
       // Slice 2x2 grid into 4 images
+      const gridImageDataUrl = await mediaUrlToDataUrl(gridImageUrl!);
       const slicedImages = await new Promise<string[]>((resolve, reject) => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
@@ -1208,7 +1180,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           resolve(results);
         };
         img.onerror = () => reject(new Error('加载四宫格图片失败'));
-        img.src = gridImageUrl!;
+        img.src = gridImageDataUrl;
       });
 
       console.log('[QuadGrid] Sliced into', slicedImages.length, 'images');
@@ -1635,77 +1607,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         return '';
       };
 
-      // Convert local/base64 image to HTTP URL for API
-      // Video API requires HTTP URLs, not base64
-      const convertToHttpUrl = async (
-        rawUrl: any,
-        options?: { localFallback?: string | null; frameLabel?: string }
-      ): Promise<string> => {
-        const url = normalizeUrl(rawUrl);
-        const localFallback = normalizeUrl(options?.localFallback);
-        const frameLabel = options?.frameLabel || 'Frame';
-        if (!url) {
-          console.warn('[SplitScenes] convertToHttpUrl received invalid url:', rawUrl);
-          return '';
-        }
-        
-        // Already HTTP URL - use directly
-        if (isHttpImageUrl(url)) {
-          if (shouldRefreshImageViaCurrentHost(localFallback)) {
-            console.log(
-              `[SplitScenes] ${frameLabel}: refreshing via configured image host instead of reusing existing HTTP URL${isDiscouragedExternalImageUrl(url) ? ' (discouraged external host)' : ''}:`,
-              url.substring(0, 60)
-            );
-            return convertToHttpUrl(localFallback, { frameLabel });
-          }
-          if (isDiscouragedExternalImageUrl(url)) {
-            console.warn(`[SplitScenes] ${frameLabel}: using discouraged external URL because no local fallback is available:`, url.substring(0, 60));
-          } else {
-            console.log('[SplitScenes] Using existing HTTP URL:', url.substring(0, 60));
-          }
-          return url;
-        }
-        
-        // For base64 or local images, we need to upload to image host
-        try {
-          // Check if image host is configured
-          if (!isImageHostConfigured()) {
-            console.warn('[SplitScenes] Image host not configured. Please configure an image host in settings.');
-            throw new Error('图床未配置，请先在设置中启用 Catbox 或其他可用图床');
-          }
-          
-          let imageData = url;
-          
-          // For local-image:// protocol, read the image first
-          if (url.startsWith('local-image://')) {
-            const fullBase64 = await readImageAsBase64(url);
-            if (!fullBase64) {
-              console.warn('[SplitScenes] Failed to read local image:', url);
-              return '';
-            }
-            imageData = fullBase64;
-          }
-          
-          // Upload to configured image host
-          console.log('[SplitScenes] Uploading image to image host...');
-          const uploadResult = await uploadToImageHost(imageData, {
-            name: `scene_${sceneId}_frame_${Date.now()}`,
-            expiration: 15552000, // 180 days
-          });
-          
-          if (uploadResult.success && uploadResult.url) {
-            console.log('[SplitScenes] Uploaded image to image host:', uploadResult.url.substring(0, 60));
-            return uploadResult.url;
-          } else {
-            console.warn('[SplitScenes] Image upload failed:', uploadResult.error);
-            throw new Error(uploadResult.error || '图片上传失败');
-          }
-        } catch (e) {
-          console.warn('[SplitScenes] Failed to upload image:', e);
-          throw e;
-        }
-      };
-
       // Build image_with_roles array
       interface ImageWithRole {
         url: string;
@@ -1717,9 +1618,12 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       const normalizedFirstFrame = normalizeUrl(firstFrameUrl);
       console.log('[SplitScenes] First frame URL (normalized):', normalizedFirstFrame?.substring(0, 80));
       
-      const firstFrameConverted = await convertToHttpUrl(normalizedFirstFrame, {
+      const firstFrameConverted = await resolveImageToHttpUrl(normalizedFirstFrame, {
         localFallback: scene.imageDataUrl,
         frameLabel: 'First frame',
+        uploadName: `scene_${sceneId}_first_${Date.now()}`,
+        minDimension: 300,
+        logPrefix: 'SplitScenes',
       });
       if (!firstFrameConverted) {
         throw new Error('无法获取首帧图片的 HTTP URL，请重新生成图片');
@@ -1729,9 +1633,12 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
 
       // Last frame (optional)
       if (lastFrameUrl) {
-        const lastFrameConverted = await convertToHttpUrl(lastFrameUrl, {
+        const lastFrameConverted = await resolveImageToHttpUrl(lastFrameUrl, {
           localFallback: scene.endFrameImageUrl,
           frameLabel: 'Last frame',
+          uploadName: `scene_${sceneId}_last_${Date.now()}`,
+          minDimension: 300,
+          logPrefix: 'SplitScenes',
         });
         if (lastFrameConverted) {
           imageWithRoles.push({ url: lastFrameConverted, role: 'last_frame' });
@@ -2028,24 +1935,11 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         imageBaseUrl,
       });
 
-      // Collect reference images for API
-      // Supports: HTTP URLs, base64 Data URI, local-image:// (converted to base64)
-      const processedRefs: string[] = [];
-      for (const url of referenceImages.slice(0, 14)) {
-        if (!url) continue;
-        if (url.startsWith('http://') || url.startsWith('https://')) {
-          processedRefs.push(url);
-        } else if (url.startsWith('data:image/') && url.includes(';base64,')) {
-          processedRefs.push(url);
-        } else if (url.startsWith('local-image://')) {
-          try {
-            const base64 = await readImageAsBase64(url);
-            if (base64) processedRefs.push(base64);
-          } catch (e) {
-            console.warn('[SplitScenes] Failed to read local image:', url, e);
-          }
-        }
-      }
+      const processedRefs = await prepareImageReferencesForApi(referenceImages, {
+        maxCount: 14,
+        requireBase64DataUrl: true,
+        logPrefix: 'SplitScenes',
+      });
 
       // Call image generation API with smart routing (auto-selects chat/completions or images/generations)
       const apiResult = await submitGridImageRequest({
@@ -2446,12 +2340,13 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
     // 切割大图为 N 个小图（根据布局的行数和列数）
     // 关键改进：切割时裁剪每个格子到目标宽高比，防止因大图宽高比不精确导致的变形
     const sliceGridImage = async (
-      gridImageUrl: string, 
-      actualCount: number, 
-      cols: number, 
+      gridImageUrl: string,
+      actualCount: number,
+      cols: number,
       rows: number,
       targetAspect: '16:9' | '9:16'
     ): Promise<string[]> => {
+      const gridImageDataUrl = await mediaUrlToDataUrl(gridImageUrl);
       const targetAspectW = targetAspect === '16:9' ? 16 : 9;
       const targetAspectH = targetAspect === '16:9' ? 9 : 16;
       const targetRatio = targetAspectW / targetAspectH;
@@ -2526,7 +2421,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           resolve(results);
         };
         img.onerror = (e) => reject(new Error('加载九宫格图片失败'));
-        img.src = gridImageUrl;
+        img.src = gridImageDataUrl;
       });
     };
 
@@ -2569,7 +2464,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       if (referencePriorityHint) {
         gridPromptParts.push(referencePriorityHint);
       }
-      
+
       gridPromptParts.push('Structure: No borders between panels, no text, no watermarks, no speech bubbles.');
       gridPromptParts.push('Consistency: Maintain consistent character appearance, lighting, color grading, and visual style across ALL panels.');
       gridPromptParts.push('</instruction>');
@@ -2643,34 +2538,11 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       });
       const apiReferenceImages = await processReferenceImagesForApi(refs, '[MergedGen]');
       
-      // 构建参考图列表
       const finalRefs = refs.slice(0, 14);
-      
-      // 处理参考图为 API 可用格式
-      // API 支持: 1) HTTP/HTTPS URL  2) Base64 Data URI (必须包含 data:image/xxx;base64, 前缀)
-      const processedRefs: string[] = [];
-      for (const url of finalRefs) {
-        if (!url) continue;
-        // HTTP/HTTPS URL - 直接使用
-        if (url.startsWith('http://') || url.startsWith('https://')) {
-          processedRefs.push(url);
-        }
-        // Base64 Data URI - 必须是完整格式 data:image/xxx;base64,...
-        else if (url.startsWith('data:image/') && url.includes(';base64,')) {
-          processedRefs.push(url);
-        }
-        // local-image:// 需要先转换为 base64
-        else if (url.startsWith('local-image://')) {
-          try {
-            const base64 = await readImageAsBase64(url);
-            if (base64 && base64.startsWith('data:image/') && base64.includes(';base64,')) {
-              processedRefs.push(base64);
-            }
-          } catch (e) {
-            console.warn('[MergedGen] Failed to read local image:', url);
-          }
-        }
-      }
+      const processedRefs = await prepareImageReferencesForApi(finalRefs, {
+        requireBase64DataUrl: true,
+        logPrefix: 'MergedGen',
+      });
       console.log('[MergedGen] Processed refs:', processedRefs.length, 'valid from', finalRefs.length, 'total');
       // 调试：打印参考图格式
       processedRefs.forEach((ref, i) => {
@@ -2972,6 +2844,12 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       throw new Error('请先在设置中配置图片生成服务映射');
     }
 
+    const preparedRefUrls = await prepareImageReferencesForApi(refUrls, {
+      maxCount: 14,
+      requireBase64DataUrl: true,
+      logPrefix: 'MergedImage',
+    });
+
     // Call image generation API with smart routing
     const mergedKeyManager = featureConfig.keyManager;
     const apiResult = await submitGridImageRequest({
@@ -2982,7 +2860,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       providerPlatform: platform,
       aspectRatio: aspect,
       resolution: storyboardConfig.resolution || '2K',
-      referenceImages: refUrls && refUrls.length > 0 ? refUrls.slice(0, 14) : undefined,
+      referenceImages: preparedRefUrls.length > 0 ? preparedRefUrls : undefined,
       keyManager: mergedKeyManager,
     });
 
@@ -2992,7 +2870,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
 
     if (!taskId && !directUrl) {
       // 对非常规响应：尝试一次"无参考"重试（保持合并模式，不降级到单图通道）
-      if (refUrls.length > 0 && strategy !== 'none') {
+      if (preparedRefUrls.length > 0 && strategy !== 'none') {
         const retryResult = await submitGridImageRequest({
           model,
           prompt,
@@ -3153,23 +3031,11 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         referenceCount: optimizedReferenceImages.length,
       });
 
-      // Process reference images for API
-      const processedRefs: string[] = [];
-      for (const url of referenceImages.slice(0, 14)) {
-        if (!url) continue;
-        if (url.startsWith('http://') || url.startsWith('https://')) {
-          processedRefs.push(url);
-        } else if (url.startsWith('data:image/') && url.includes(';base64,')) {
-          processedRefs.push(url);
-        } else if (url.startsWith('local-image://')) {
-          try {
-            const base64 = await readImageAsBase64(url);
-            if (base64) processedRefs.push(base64);
-          } catch (e) {
-            console.warn('[SplitScenes] Failed to read local image:', url, e);
-          }
-        }
-      }
+      const processedRefs = await prepareImageReferencesForApi(referenceImages, {
+        maxCount: 14,
+        requireBase64DataUrl: true,
+        logPrefix: 'SplitScenes',
+      });
 
       // Call image generation API with smart routing
       const apiResult = await submitGridImageRequest({

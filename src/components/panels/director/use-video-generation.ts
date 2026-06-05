@@ -3,8 +3,8 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { getFeatureConfig } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
-import { uploadToImageHost, isImageHostConfigured } from "@/lib/image-host";
-import { saveVideoToLocal, readImageAsBase64 } from "@/lib/image-storage";
+import { saveVideoToLocal } from "@/lib/image-storage";
+import { resolveImageToHttpUrl } from "@/lib/media-url-resolver";
 import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
@@ -97,41 +97,12 @@ export async function convertToHttpUrl(
   rawUrl: unknown,
   options?: ConvertToHttpUrlOptions
 ): Promise<string> {
-  const url = typeof rawUrl === 'string' ? rawUrl : (Array.isArray(rawUrl) ? rawUrl[0] : '');
-  const fallbackHttpUrl = typeof options?.fallbackHttpUrl === 'string' ? options.fallbackHttpUrl : '';
-  if (!url) {
-    if (fallbackHttpUrl.startsWith('http://') || fallbackHttpUrl.startsWith('https://')) {
-      return fallbackHttpUrl;
-    }
-    console.warn('[VideoGen] convertToHttpUrl received invalid url:', rawUrl);
-    return '';
-  }
-  
-  // Already HTTP URL - use directly
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    return url;
-  }
-  
-  // For base64/local data URLs, upload to image host
-  if (!isImageHostConfigured()) {
-    throw new Error('图床未配置，请在设置中配置图床 API Key');
-  }
-
-  let imageData = url;
-  if (url.startsWith('local-image://')) {
-    const base64 = await readImageAsBase64(url);
-    if (!base64) throw new Error(`无法读取本地文件: ${url.substring(0, 40)}`);
-    imageData = base64;
-  }
-
-  const result = await uploadToImageHost(imageData, {
-    name: options?.uploadName?.trim() || `media_ref_${Date.now()}`,
-    expiration: 15552000,
+  return resolveImageToHttpUrl(rawUrl, {
+    localFallback: options?.fallbackHttpUrl,
+    uploadName: options?.uploadName?.trim() || `media_ref_${Date.now()}`,
+    minDimension: 300,
+    logPrefix: 'VideoGen',
   });
-  if (!result.success || !result.url) {
-    throw new Error(result.error || '图床上传失败');
-  }
-  return result.url;
 }
 
 // Build image_with_roles array for video generation
@@ -338,90 +309,6 @@ function handleVideoSubmitError(
   throw err;
 }
 
-// ==================== 图片最小尺寸保障 ====================
-
-/**
- * 视频生成 API 通常要求输入图片满足最小尺寸（如 Seedance 要求宽度 ≥ 300px）。
- * 当九宫格切割后的图片尺寸过小时，自动放大到满足最低要求后重新上传。
- * @param imageUrl  HTTP URL 图片地址
- * @param minDimension  宽高的最小像素值（默认 300，匹配 Seedance 等模型要求）
- * @returns 原始 URL（尺寸达标）或放大后重新上传的新 URL
- */
-async function ensureMinImageSize(
-  imageUrl: string,
-  minDimension: number = 300,
-): Promise<string> {
-  if (!imageUrl || !imageUrl.startsWith('http')) return imageUrl;
-
-  let objectUrl: string | undefined;
-  try {
-    // 通过 fetch 加载图片为 blob，避免 CORS 问题
-    const response = await fetch(imageUrl);
-    if (!response.ok) {
-      console.warn('[VideoGen] ensureMinImageSize: fetch failed', response.status);
-      return imageUrl;
-    }
-    const blob = await response.blob();
-    objectUrl = URL.createObjectURL(blob);
-
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error('Failed to decode image'));
-      image.src = objectUrl!;
-    });
-
-    const { naturalWidth, naturalHeight } = img;
-
-    if (naturalWidth >= minDimension && naturalHeight >= minDimension) {
-      URL.revokeObjectURL(objectUrl);
-      return imageUrl; // 尺寸达标
-    }
-
-    // 计算等比放大系数
-    const scaleW = naturalWidth < minDimension ? minDimension / naturalWidth : 1;
-    const scaleH = naturalHeight < minDimension ? minDimension / naturalHeight : 1;
-    const scale = Math.max(scaleW, scaleH);
-    const newWidth = Math.ceil(naturalWidth * scale);
-    const newHeight = Math.ceil(naturalHeight * scale);
-
-    console.log(`[VideoGen] Image too small (${naturalWidth}×${naturalHeight}), upscaling to ${newWidth}×${newHeight}`);
-
-    // Canvas 放大
-    const canvas = document.createElement('canvas');
-    canvas.width = newWidth;
-    canvas.height = newHeight;
-    const ctx = canvas.getContext('2d')!;
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, 0, 0, newWidth, newHeight);
-    URL.revokeObjectURL(objectUrl); // drawImage 完成后释放
-    objectUrl = undefined;
-    const upscaledDataUrl = canvas.toDataURL('image/png');
-
-    // 重新上传到图床
-    if (!isImageHostConfigured()) {
-      console.warn('[VideoGen] Image host not configured, cannot re-upload upscaled image');
-      return imageUrl;
-    }
-    const result = await uploadToImageHost(upscaledDataUrl, {
-      name: `upscaled_${Date.now()}`,
-      expiration: 15552000,
-    });
-    if (result.success && result.url) {
-      console.log(`[VideoGen] Upscaled & re-uploaded: ${result.url.substring(0, 60)}`);
-      return result.url;
-    }
-
-    console.warn('[VideoGen] Re-upload failed, using original URL');
-    return imageUrl;
-  } catch (e) {
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-    console.warn('[VideoGen] ensureMinImageSize failed, using original:', e);
-    return imageUrl;
-  }
-}
-
 // ==================== 视频生成主入口 ====================
 
 /** AbortSignal 感知的 sleep：若信号触发则立即以 '用户已取消' 拒绝 */
@@ -472,11 +359,11 @@ export async function callVideoGenerationApi(
     throw new Error('请先在设置中配置视频生成服务映射');
   }
 
-  // 确保所有输入图片满足视频 API 的最小尺寸要求（如 Seedance ≥ 300px）
+  // 上游调用点已通过 media-url-resolver 统一转换图片 URL，这里不再二次 fetch 外链。
   const processedImages = await Promise.all(
     imageWithRoles.map(async (img) => ({
       ...img,
-      url: await ensureMinImageSize(img.url),
+      url: img.url,
     }))
   );
 

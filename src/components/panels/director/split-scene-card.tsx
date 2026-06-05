@@ -11,7 +11,7 @@
 
 import React, { useState, useRef } from "react";
 import { cn } from "@/lib/utils";
-import { readImageAsBase64 } from "@/lib/image-storage";
+import { mediaUrlToBlob } from "@/lib/media-url-resolver";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -288,19 +288,8 @@ export function SplitSceneCard({
   // 下载图片
   const handleDownloadImage = async (imageUrl: string, filename: string) => {
     try {
-      let blob: Blob;
-      if (imageUrl.startsWith('local-image://')) {
-        // Electron 自定义协议：通过 IPC 读取为 base64 再转 blob
-        const base64 = await readImageAsBase64(imageUrl);
-        if (!base64) throw new Error('无法读取本地图片');
-        const res = await fetch(base64);
-        blob = await res.blob();
-      } else {
-        // data: / http: / https: 均可直接 fetch
-        const res = await fetch(imageUrl);
-        blob = await res.blob();
-      }
-      
+      const blob = await mediaUrlToBlob(imageUrl);
+
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;

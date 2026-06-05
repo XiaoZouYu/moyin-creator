@@ -5,7 +5,7 @@ import { useCharacterLibraryStore } from "@/stores/character-library-store";
 import { getFeatureConfig } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
 import { imageUrlToBase64, submitGridImageRequest } from "@/lib/ai/image-generator";
-import { readImageAsBase64 } from "@/lib/image-storage";
+import { mediaUrlToDataUrl, prepareImageReferencesForApi } from "@/lib/media-url-resolver";
 import type { SplitScene, ShotSizeType } from "@/stores/director-store";
 
 // Helper to normalize URL (handle array format)
@@ -18,30 +18,11 @@ export function normalizeUrl(url: unknown): string | undefined {
 
 // Process reference images to API-compatible format
 export async function processReferenceImages(urls: string[], maxCount: number = 4): Promise<string[]> {
-  const processedRefs: string[] = [];
-  for (const url of urls.slice(0, maxCount)) {
-    if (!url) continue;
-    // HTTP/HTTPS URLs - use directly
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      processedRefs.push(url);
-    }
-    // Base64 Data URI - use directly
-    else if (url.startsWith('data:image/') && url.includes(';base64,')) {
-      processedRefs.push(url);
-    }
-    // Local image path - convert to base64
-    else if (url.startsWith('local-image://')) {
-      try {
-        const base64 = await readImageAsBase64(url);
-        if (base64 && base64.startsWith('data:image/') && base64.includes(';base64,')) {
-          processedRefs.push(base64);
-        }
-      } catch (e) {
-        console.warn('[ImageGen] Failed to read local image:', url, e);
-      }
-    }
-  }
-  return processedRefs;
+  return prepareImageReferencesForApi(urls, {
+    maxCount,
+    requireBase64DataUrl: true,
+    logPrefix: 'ImageGen',
+  });
 }
 
 // Get API configuration for image generation
@@ -297,7 +278,8 @@ export function composeTilePrompt(scene: SplitScene, angle: Angle, aspect: '16:9
 export async function sliceGridImage(gridImageUrl: string, count: number): Promise<string[]> {
   const cols = 3;
   const rows = Math.ceil(count / cols);
-  
+  const imageSource = await mediaUrlToDataUrl(gridImageUrl);
+
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -319,7 +301,7 @@ export async function sliceGridImage(gridImageUrl: string, count: number): Promi
       resolve(results);
     };
     img.onerror = () => reject(new Error('加载九宫格图片失败'));
-    img.src = gridImageUrl;
+    img.src = imageSource;
   });
 }
 

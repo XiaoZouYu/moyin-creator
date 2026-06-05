@@ -7,6 +7,7 @@
  */
 
 import { getUserScopedMediaCategory } from './user-session';
+import { corsFetch } from './cors-fetch';
 
 // Type declarations for the imageStorage API exposed by preload
 declare global {
@@ -123,7 +124,10 @@ export async function readImageAsBase64(imagePath: string): Promise<string | nul
   // If it's a remote URL, fetch and convert
   if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
     try {
-      const response = await fetch(imagePath);
+      const response = await corsFetch(imagePath);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
       const blob = await response.blob();
       return new Promise((resolve) => {
         const reader = new FileReader();
