@@ -9,7 +9,7 @@
 
 import { saveImageToLocal, type ImageCategory } from '@/lib/image-storage';
 import { uploadToImageHost, isImageHostConfigured } from '@/lib/image-host';
-import { normalizeImageSourceToDataUrlForApi } from '@/lib/media-url-resolver';
+import { getUserScopedMediaCategory } from '@/lib/user-session';
 
 export interface PersistResult {
   /** local-image:// in Electron, OSS HTTP URL in Web */
@@ -33,17 +33,18 @@ async function saveImageForPersistence(
   category: ImageCategory,
   filename: string,
 ): Promise<string> {
-  const normalizedImage = await normalizeImageSourceToDataUrlForApi(imageData);
-  const localPath = await saveImageToLocal(normalizedImage, category, filename);
-
   if (isWebBrowserRuntime()) {
-    if (!isHttpUrl(localPath)) {
-      throw new Error('OSS 媒体上传失败：Web 端不能保存浏览器本地图片，请检查生产环境 __cloud_media/OSS 配置');
+    if (!window.imageStorage?.saveImage) {
+      throw new Error('OSS 媒体上传失败：Web 图片存储接口未初始化');
     }
-    return localPath;
+    const result = await window.imageStorage.saveImage(imageData, getUserScopedMediaCategory(category), filename);
+    if (!result.success || !result.localPath || !isHttpUrl(result.localPath)) {
+      throw new Error(result.error || 'OSS 媒体上传失败：Web 端不能保存浏览器本地图片，请检查生产环境 __cloud_media/OSS 配置');
+    }
+    return result.localPath;
   }
 
-  return localPath;
+  return saveImageToLocal(imageData, category, filename);
 }
 
 /**

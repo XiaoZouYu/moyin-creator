@@ -730,6 +730,7 @@ function installImageStorage() {
         }
 
         const blob = await sourceToBlob(url)
+        await assertImageUploadBlob(blob)
         const safeName = ensureExtension(safeFilename(filename), blob.type || 'application/octet-stream')
         const key = `${category}/${safeName}`
         const saved = await cloudMediaSave(key, blob)

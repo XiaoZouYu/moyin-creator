@@ -25,7 +25,7 @@ import {
   resolveProviderImageApiFormat,
 } from '@/lib/ai/provider-platforms';
 import { corsFetch } from '@/lib/cors-fetch';
-import { mediaUrlToBlob, mediaUrlToDataUrl, normalizeImageDataUrlForApi, normalizeImageSourceToDataUrlForApi, resolveImageToHttpUrl } from '@/lib/media-url-resolver';
+import { mediaUrlToBlob, mediaUrlToDataUrl, normalizeImageDataUrlForApi, resolveImageToHttpUrl } from '@/lib/media-url-resolver';
 import { isVeoModel, resolveVeoUploadCapability } from '@/lib/freedom/veo-capability';
 import { type AIFeature, useAPIConfigStore } from '@/stores/api-config-store';
 import { useMediaStore } from '@/stores/media-store';
@@ -1445,7 +1445,7 @@ async function toUploadHttpUrl(file: FreedomVideoUploadFile): Promise<string> {
 
 async function toVolcImageInputUrl(file: FreedomVideoUploadFile): Promise<string> {
   try {
-    return normalizeImageSourceToDataUrlForApi(file.dataUrl);
+    return normalizeImageDataUrlForApi(await mediaUrlToDataUrl(file.dataUrl));
   } catch (error) {
     console.error('[Freedom] Volc video image conversion failed', {
       role: file.role,
