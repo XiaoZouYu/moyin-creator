@@ -1132,6 +1132,7 @@ async function fetchViaNodeFallbacks(url: string, init: RequestInit): Promise<Re
 
 async function fetchViaElectronNet(url: string, init: RequestInit): Promise<Response> {
   const isResponsesRequest = /\/responses(?:[/?]|$)/i.test(url)
+  const isVolcTaskRequest = /\/contents\/generations\/tasks(?:[/?]|$)/i.test(url)
 
   // IMAGE2 works in the standalone Node test script even when Electron's embedded
   // network stacks fail. Start with an external Node child so TLS/runtime behavior
@@ -1164,6 +1165,29 @@ async function fetchViaElectronNet(url: string, init: RequestInit): Promise<Resp
         console.warn('[API Fetch] Node fetch failed for Responses, falling back to Electron net.fetch', {
           url,
           error: getFetchErrorMessage(fetchError),
+        })
+        return net.fetch(url, init)
+      }
+    }
+  }
+
+  if (isVolcTaskRequest) {
+    try {
+      console.log('[API Fetch] Volc task transport: node:http')
+      return await fetchTextViaNodeHttp(url, init)
+    } catch (nodeHttpError) {
+      if (init.signal?.aborted) throw nodeHttpError
+      console.warn('[API Fetch] node:http failed for Volc task, retrying with Node fallbacks', {
+        url,
+        error: getFetchErrorMessage(nodeHttpError),
+      })
+      try {
+        return await fetchViaNodeFallbacks(url, init)
+      } catch (nodeError) {
+        if (init.signal?.aborted || typeof net.fetch !== 'function') throw nodeError
+        console.warn('[API Fetch] Node fallbacks failed for Volc task, retrying with Electron net.fetch', {
+          url,
+          error: getFetchErrorMessage(nodeError),
         })
         return net.fetch(url, init)
       }
