@@ -1,8 +1,13 @@
 import { createReadStream, existsSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { extname, join, normalize, resolve, sep } from 'node:path'
+import httpsProxyAgent from 'https-proxy-agent'
 import { handleCloudMediaRequest, handleCloudStorageRequest } from './cloud-storage.mjs'
+
+const { HttpsProxyAgent } = httpsProxyAgent
 
 const PORT = Number(process.env.PORT || 8080)
 const HOST = process.env.HOST || '0.0.0.0'
@@ -95,6 +100,89 @@ async function readRequestBody(req) {
   return Buffer.concat(chunks)
 }
 
+function getEnvProxyUrl(targetUrl) {
+  const url = new URL(targetUrl)
+  const noProxy = process.env.NO_PROXY || process.env.no_proxy || ''
+  const host = url.hostname
+  const shouldBypass = noProxy
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .some((entry) => host === entry || host.endsWith(entry.replace(/^\./, '')))
+  if (shouldBypass) return null
+
+  if (url.protocol === 'https:') {
+    return process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy || null
+  }
+  return process.env.HTTP_PROXY || process.env.http_proxy || process.env.ALL_PROXY || process.env.all_proxy || null
+}
+
+function fetchViaProxy(targetUrl, method, headers, body, proxyUrl) {
+  return new Promise((resolveResponse, rejectResponse) => {
+    const url = new URL(targetUrl)
+    const request = url.protocol === 'https:' ? httpsRequest : httpRequest
+    const requestHeaders = { ...headers }
+    if (body && !Object.keys(requestHeaders).some((key) => key.toLowerCase() === 'content-length')) {
+      requestHeaders['content-length'] = String(body.length)
+    }
+
+    const proxyRequest = request(url, {
+      method,
+      headers: requestHeaders,
+      agent: new HttpsProxyAgent(proxyUrl),
+    }, (proxyResponse) => {
+      const chunks = []
+      proxyResponse.on('data', (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      })
+      proxyResponse.on('end', () => {
+        const responseHeaders = new Headers()
+        for (const [key, value] of Object.entries(proxyResponse.headers)) {
+          if (Array.isArray(value)) {
+            for (const item of value) responseHeaders.append(key, item)
+          } else if (value !== undefined) {
+            responseHeaders.set(key, String(value))
+          }
+        }
+        resolveResponse(new Response(Buffer.concat(chunks), {
+          status: proxyResponse.statusCode || 502,
+          statusText: proxyResponse.statusMessage,
+          headers: responseHeaders,
+        }))
+      })
+    })
+
+    proxyRequest.on('error', rejectResponse)
+    if (body && body.length > 0) proxyRequest.write(body)
+    proxyRequest.end()
+  })
+}
+
+async function fetchWithProxyFallback(targetUrl, method, headers, body) {
+  try {
+    return await fetch(targetUrl, {
+      method,
+      headers,
+      body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
+    })
+  } catch (error) {
+    const proxyUrl = getEnvProxyUrl(targetUrl)
+    if (!proxyUrl) throw error
+    console.warn('[moyin-web] Direct proxy fetch failed; retrying via configured proxy', {
+      targetUrl,
+      proxyUrl,
+      detail: error instanceof Error ? error.message : String(error),
+    })
+    return fetchViaProxy(
+      targetUrl,
+      method,
+      headers,
+      method !== 'GET' && method !== 'HEAD' ? body : undefined,
+      proxyUrl,
+    )
+  }
+}
+
 async function handleProxy(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -134,11 +222,7 @@ async function handleProxy(req, res) {
     }
 
     const method = req.method || 'GET'
-    const upstream = await fetch(targetUrl, {
-      method,
-      headers,
-      body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
-    })
+    const upstream = await fetchWithProxyFallback(targetUrl, method, headers, body)
 
     const responseHeaders = {
       'access-control-allow-origin': '*',

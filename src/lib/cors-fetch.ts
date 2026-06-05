@@ -202,7 +202,18 @@ export async function corsFetch(
     body: proxyBody,
   };
 
-  const response = await fetch(proxyUrl, proxyInit);
+  let response: Response;
+  try {
+    response = await fetch(proxyUrl, proxyInit);
+  } catch (error) {
+    const configuredProxy = import.meta.env?.VITE_WEB_API_PROXY_URL;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      configuredProxy
+        ? `跨域代理请求失败：${detail}。请确认 VITE_WEB_API_PROXY_URL 指向的代理可访问并允许 CORS/OPTIONS。`
+        : `跨域代理 /__api_proxy 请求失败：${detail}。请确认正式环境使用 scripts/web-server.mjs/Docker 服务，或配置 VITE_WEB_API_PROXY_URL。`,
+    );
+  }
   const configuredProxy = import.meta.env?.VITE_WEB_API_PROXY_URL;
   const contentType = response.headers.get('content-type') || '';
   if (!configuredProxy && response.status === 404 && contentType.includes('text/html')) {

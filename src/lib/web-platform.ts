@@ -280,11 +280,22 @@ async function webFetch(targetUrl: string, init?: RequestInit): Promise<Response
   headers['x-proxy-headers'] = JSON.stringify(originalHeaders)
 
   const proxyUrl = buildProxyUrl(targetUrl)
-  const response = await fetch(proxyUrl, {
-    ...init,
-    headers,
-    body: proxyBody,
-  })
+  let response: Response
+  try {
+    response = await fetch(proxyUrl, {
+      ...init,
+      headers,
+      body: proxyBody,
+    })
+  } catch (error) {
+    const configuredProxy = import.meta.env.VITE_WEB_API_PROXY_URL
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      configuredProxy
+        ? `Web API proxy request failed: ${detail}. Check VITE_WEB_API_PROXY_URL CORS/OPTIONS configuration.`
+        : `Web API proxy /__api_proxy request failed: ${detail}. Run the production web server or configure VITE_WEB_API_PROXY_URL.`,
+    )
+  }
 
   const configuredProxy = import.meta.env.VITE_WEB_API_PROXY_URL
   const contentType = response.headers.get('content-type') || ''
