@@ -4,7 +4,7 @@
 import { getFeatureConfig } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
 import { saveVideoToLocal } from "@/lib/image-storage";
-import { mediaUrlToDataUrl, normalizeImageDataUrlForApi, resolveImageToHttpUrl } from "@/lib/media-url-resolver";
+import { blobToDataUrl, isHttpMediaUrl, mediaUrlToDataUrl, normalizeImageDataUrlForApi, resolveImageToHttpUrl } from "@/lib/media-url-resolver";
 import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
@@ -828,23 +828,46 @@ async function callVolcVideoApi(
     return textContent;
   };
 
+  const normalizeVolcImageDataUrl = (dataUrl: string, label: string, contentType?: string): string => {
+    try {
+      return normalizeImageDataUrlForApi(dataUrl);
+    } catch {
+      const mimeType = contentType || dataUrl.match(/^data:([^;,]+)/i)?.[1] || 'unknown';
+      throw new Error(`${label}返回的不是支持图片：content-type=${mimeType}`);
+    }
+  };
+
+  const readVolcImageDataUrl = async (source: string, label: string): Promise<string> => {
+    if (isHttpMediaUrl(source)) {
+      const response = await corsFetch(source);
+      if (!response.ok) {
+        throw new Error(`${label}下载失败：HTTP ${response.status} ${response.statusText || ''}`.trim());
+      }
+      const contentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+      const blob = await response.blob();
+      return normalizeVolcImageDataUrl(await blobToDataUrl(blob), label, contentType || blob.type);
+    }
+
+    return normalizeVolcImageDataUrl(await mediaUrlToDataUrl(source), label);
+  };
+
   const toVolcImageDataUrl = async (img: { url: string; role?: string; sourceUrl?: string }): Promise<string> => {
-    const sources = [img.url, img.sourceUrl].filter((source): source is string => !!source);
+    const sources = [...new Set([img.url, img.sourceUrl].filter((source): source is string => !!source))];
     const label = img.role === 'last_frame' ? '尾帧图' : '首帧图';
-    let lastError: unknown = null;
-    for (const source of [...new Set(sources)]) {
+    const errors: string[] = [];
+    for (const source of sources) {
       try {
-        return normalizeImageDataUrlForApi(await mediaUrlToDataUrl(source));
+        return await readVolcImageDataUrl(source, label);
       } catch (error) {
-        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push(message);
         console.warn('[VideoGen] Volc image source conversion failed, trying fallback', {
           sourceKind: source.startsWith('http') ? 'http' : source.startsWith('data:') ? 'data' : source.startsWith('local-image://') ? 'local-image' : 'other',
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
         });
       }
     }
-    const message = lastError instanceof Error ? lastError.message : String(lastError || '未知错误');
-    throw new Error(`${label}读取失败：${message}`);
+    throw new Error(errors.join('；') || `${label}读取失败：没有可用图片地址`);
   };
 
   // 图片内容（首帧/尾帧）
