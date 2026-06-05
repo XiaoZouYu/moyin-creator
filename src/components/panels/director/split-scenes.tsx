@@ -1611,6 +1611,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       interface ImageWithRole {
         url: string;
         role: 'first_frame' | 'last_frame';
+        sourceUrl?: string;
       }
       const imageWithRoles: ImageWithRole[] = [];
 
@@ -1629,12 +1630,17 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       if (!firstFrameConverted) {
         throw new Error('无法获取首帧图片的 HTTP URL，请重新生成图片');
       }
-      imageWithRoles.push({ url: firstFrameConverted, role: 'first_frame' });
+      imageWithRoles.push({
+        url: firstFrameConverted,
+        role: 'first_frame',
+        sourceUrl: scene.imageDataUrl || normalizedFirstFrame,
+      });
       console.log('[SplitScenes] First frame HTTP URL:', firstFrameConverted.substring(0, 60));
 
       // Last frame (optional)
       if (lastFrameUrl) {
-        const lastFrameConverted = await resolveImageToHttpUrl(lastFrameUrl, {
+        const normalizedLastFrame = normalizeUrl(lastFrameUrl);
+        const lastFrameConverted = await resolveImageToHttpUrl(normalizedLastFrame, {
           localFallback: scene.endFrameImageUrl,
           frameLabel: 'Last frame',
           uploadName: `scene_${sceneId}_last_${Date.now()}`,
@@ -1643,7 +1649,11 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           logPrefix: 'SplitScenes',
         });
         if (lastFrameConverted) {
-          imageWithRoles.push({ url: lastFrameConverted, role: 'last_frame' });
+          imageWithRoles.push({
+            url: lastFrameConverted,
+            role: 'last_frame',
+            sourceUrl: scene.endFrameImageUrl || normalizedLastFrame,
+          });
           console.log('[SplitScenes] Last frame HTTP URL:', lastFrameConverted.substring(0, 60));
         }
       }

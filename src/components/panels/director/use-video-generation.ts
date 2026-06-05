@@ -10,6 +10,10 @@ import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
 import { buildVolcVideoTaskUrls, isVolcArkVideoPlatform } from "@/lib/volc-ark-video";
 import {
+  ensureStructuredCaptionVideoPrompt,
+  shouldRetryWithStructuredCaptionPrompt,
+} from "@/lib/generation/structured-video-prompt";
+import {
   AGNES_VIDEO_LAST_FRAME_UNSUPPORTED_MESSAGE,
   isAgnesProvider,
   isAgnesVideoModel,
@@ -93,6 +97,14 @@ interface ConvertToHttpUrlOptions {
   forceReuploadHttp?: boolean;
 }
 
+type VideoImageRole = 'first_frame' | 'last_frame';
+
+export interface VideoImageWithRole {
+  url: string;
+  role: VideoImageRole;
+  sourceUrl?: string;
+}
+
 // Convert local/base64 image to HTTP URL for API
 export async function convertToHttpUrl(
   rawUrl: unknown,
@@ -111,21 +123,22 @@ export async function convertToHttpUrl(
 export async function buildImageWithRoles(
   firstFrameUrl: string | undefined,
   lastFrameUrl: string | undefined
-): Promise<Array<{ url: string; role: 'first_frame' | 'last_frame' }>> {
-  const imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }> = [];
+): Promise<VideoImageWithRole[]> {
+  const imageWithRoles: VideoImageWithRole[] = [];
 
   if (firstFrameUrl) {
     const normalizedFirstFrame = normalizeUrl(firstFrameUrl) || '';
     const firstFrameConverted = await convertToHttpUrl(normalizedFirstFrame);
     if (firstFrameConverted) {
-      imageWithRoles.push({ url: firstFrameConverted, role: 'first_frame' });
+      imageWithRoles.push({ url: firstFrameConverted, role: 'first_frame', sourceUrl: normalizedFirstFrame });
     }
   }
 
   if (lastFrameUrl) {
-    const lastFrameConverted = await convertToHttpUrl(lastFrameUrl);
+    const normalizedLastFrame = normalizeUrl(lastFrameUrl) || '';
+    const lastFrameConverted = await convertToHttpUrl(normalizedLastFrame);
     if (lastFrameConverted) {
-      imageWithRoles.push({ url: lastFrameConverted, role: 'last_frame' });
+      imageWithRoles.push({ url: lastFrameConverted, role: 'last_frame', sourceUrl: normalizedLastFrame });
     }
   }
 
@@ -328,7 +341,7 @@ export async function callVideoGenerationApi(
   prompt: string,
   duration: number,
   aspectRatio: string,
-  imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }>,
+  imageWithRoles: VideoImageWithRole[],
   onProgress?: (progress: number) => void,
   keyManager?: { getCurrentKey?: () => string | null; handleError: (status: number, errorText?: string) => boolean; getAvailableKeyCount: () => number; getTotalKeyCount: () => number },
   platform?: string,
@@ -775,7 +788,7 @@ async function callVolcVideoApi(
   baseUrl: string,
   model: string,
   aspectRatio: string,
-  imageWithRoles: Array<{ url: string; role: string }>,
+  imageWithRoles: Array<{ url: string; role: string; sourceUrl?: string }>,
   videoResolution?: string,
   duration?: number,
   cameraFixed?: boolean,
@@ -792,22 +805,48 @@ async function callVolcVideoApi(
   // 构建 content 数组（Volcengine 格式: text + image_url）
   const content: Array<Record<string, unknown>> = [];
 
-  // 文本内容：prompt + 内联参数（--rs, --rt, --dur, --cf）
-  let textContent = prompt;
   const resolution = (videoResolution || '720p').toLowerCase();
-  if (!officialArk) {
+  const buildTextContent = (textPrompt: string, structuredPrompt: boolean): string => {
+    if (structuredPrompt) {
+      const promptWithParams = [
+        textPrompt,
+        `Video parameters: resolution ${resolution}, aspect ratio ${aspectRatio}`,
+        duration ? `duration ${duration} seconds` : '',
+        cameraFixed !== undefined ? `camera fixed ${cameraFixed}` : '',
+      ].filter(Boolean).join('. ');
+      return ensureStructuredCaptionVideoPrompt(promptWithParams);
+    }
+
+    if (officialArk) return textPrompt;
+    let textContent = textPrompt;
     textContent += ` --rs ${resolution}`;
     textContent += ` --rt ${aspectRatio}`;
     if (duration) textContent += ` --dur ${duration}`;
     if (cameraFixed !== undefined) textContent += ` --cf ${cameraFixed}`;
-  }
+    return textContent;
+  };
 
-  content.push({ type: 'text', text: textContent });
+  const toVolcImageDataUrl = async (img: { url: string; sourceUrl?: string }): Promise<string> => {
+    const sources = [img.sourceUrl, img.url].filter((source): source is string => !!source);
+    let lastError: unknown = null;
+    for (const source of [...new Set(sources)]) {
+      try {
+        return normalizeImageDataUrlForApi(await mediaUrlToDataUrl(source));
+      } catch (error) {
+        lastError = error;
+        console.warn('[VideoGen] Volc image source conversion failed, trying fallback', {
+          sourceKind: source.startsWith('http') ? 'http' : source.startsWith('data:') ? 'data' : source.startsWith('local-image://') ? 'local-image' : 'other',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('Volc 图片输入转换失败');
+  };
 
   // 图片内容（首帧/尾帧）
   for (const img of imageWithRoles) {
     if (img.url) {
-      const imageUrl = normalizeImageDataUrlForApi(await mediaUrlToDataUrl(img.url));
+      const imageUrl = await toVolcImageDataUrl(img);
       content.push({
         type: 'image_url',
         image_url: { url: imageUrl },
@@ -816,39 +855,32 @@ async function callVolcVideoApi(
     }
   }
 
-  // Seedance 2.0 多模态：视频引用（延长/编辑/运镜复刻等）
-  if (videoRefs && videoRefs.length > 0) {
-    for (const vUrl of videoRefs) {
-      if (vUrl) {
-        content.push({
-          type: 'video_url',
-          video_url: { url: vUrl },
-        });
-      }
-    }
-  }
+  const mediaContent = content;
+  const buildContent = (textPrompt: string, structuredPrompt: boolean): Array<Record<string, unknown>> => [
+    { type: 'text', text: buildTextContent(textPrompt, structuredPrompt) },
+    ...mediaContent,
+    ...(videoRefs || []).filter(Boolean).map((vUrl) => ({
+      type: 'video_url',
+      video_url: { url: vUrl },
+    })),
+    ...(audioRefs || []).filter(Boolean).map((aUrl) => ({
+      type: 'audio_url',
+      audio_url: { url: aUrl },
+    })),
+  ];
 
-  // Seedance 2.0 多模态：音频引用（BGM/卡点等）
-  if (audioRefs && audioRefs.length > 0) {
-    for (const aUrl of audioRefs) {
-      if (aUrl) {
-        content.push({
-          type: 'audio_url',
-          audio_url: { url: aUrl },
-        });
-      }
-    }
-  }
-
-  const requestBody = officialArk
-    ? {
-        model,
-        content,
-        ...(duration ? { duration } : {}),
-        generate_audio: generateAudio,
-        ...(aspectRatio ? { ratio: aspectRatio } : {}),
-      }
-    : { model, content };
+  const buildRequestBody = (textPrompt: string, structuredPrompt: boolean) => {
+    const requestContent = buildContent(textPrompt, structuredPrompt);
+    return officialArk
+      ? {
+          model,
+          content: requestContent,
+          ...(duration ? { duration } : {}),
+          generate_audio: generateAudio,
+          ...(aspectRatio ? { ratio: aspectRatio } : {}),
+        }
+      : { model, content: requestContent };
+  };
   const taskUrls = buildVolcVideoTaskUrls(baseUrl, officialArk);
 
   console.log(`[VideoGen] Volc format → POST ${taskUrls.routeLabel}`, {
@@ -861,23 +893,39 @@ async function callVolcVideoApi(
     imageInputMode: imageWithRoles.some(i => i.url) ? 'base64_data_uri' : 'none',
   });
 
-  const submitResponse = await corsFetch(taskUrls.submit, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(requestBody),
-  });
+  const submitTask = async (structuredPrompt: boolean): Promise<unknown> => {
+    const submitResponse = await corsFetch(taskUrls.submit, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(buildRequestBody(prompt, structuredPrompt)),
+    });
 
-  if (!submitResponse.ok) {
-    const errorText = await submitResponse.text();
-    console.error('[VideoGen] Volc video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager);
-  }
+    if (!submitResponse.ok) {
+      const errorText = await submitResponse.text();
+      if (!structuredPrompt && shouldRetryWithStructuredCaptionPrompt(errorText)) {
+        console.warn('[VideoGen] Volc requires structured caption prompt; retrying once with style_caption JSON');
+        return submitTask(true);
+      }
+      console.error('[VideoGen] Volc video submit error:', submitResponse.status, errorText);
+      handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+    }
 
-  const submitData = await submitResponse.json();
+    const data = await submitResponse.json();
+    if (!structuredPrompt && (data.status === 'failed' || data.status === 'error')) {
+      const proxyMsg = JSON.stringify(data);
+      if (shouldRetryWithStructuredCaptionPrompt(proxyMsg)) {
+        console.warn('[VideoGen] Volc requires structured caption prompt; retrying once with style_caption JSON');
+        return submitTask(true);
+      }
+    }
+    return data;
+  };
+
+  const submitData = await submitTask(false) as any;
   console.log('[VideoGen] Volc submit response:', JSON.stringify(submitData).substring(0, 500));
 
   // 检测代理包装的业务级错误（HTTP 200 但 body.status 为 failed/error）

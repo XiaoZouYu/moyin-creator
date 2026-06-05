@@ -1211,7 +1211,7 @@ function getExtensionFromMimeType(mimeType?: string) {
   }
 }
 
-function getMimeTypeFromExtension(filePath: string) {
+function getMimeTypeFromExtension(filePath: string): string | undefined {
   const extension = path.extname(filePath).toLowerCase()
   const mimeTypes: Record<string, string> = {
     '.png': 'image/png',
@@ -1223,15 +1223,58 @@ function getMimeTypeFromExtension(filePath: string) {
     '.svg': 'image/svg+xml',
     '.avif': 'image/avif',
   }
-  return mimeTypes[extension] || 'image/png'
+  return mimeTypes[extension]
+}
+
+function asciiFromBuffer(buffer: Buffer, start: number, length: number): string {
+  if (buffer.length < start + length) return ''
+  return buffer.subarray(start, start + length).toString('ascii')
+}
+
+function inferImageMimeTypeFromBuffer(buffer: Buffer): string | undefined {
+  if (buffer.length < 4) return undefined
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg'
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) return 'image/png'
+  if (asciiFromBuffer(buffer, 0, 4) === 'RIFF' && asciiFromBuffer(buffer, 8, 4) === 'WEBP') return 'image/webp'
+  if (asciiFromBuffer(buffer, 0, 6) === 'GIF87a' || asciiFromBuffer(buffer, 0, 6) === 'GIF89a') return 'image/gif'
+  if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp'
+  if (
+    (buffer[0] === 0x49 && buffer[1] === 0x49 && (buffer[2] === 0x2a || buffer[2] === 0x2b) && buffer[3] === 0x00) ||
+    (buffer[0] === 0x4d && buffer[1] === 0x4d && buffer[2] === 0x00 && (buffer[3] === 0x2a || buffer[3] === 0x2b))
+  ) return 'image/tiff'
+  if (asciiFromBuffer(buffer, 4, 4) === 'ftyp') {
+    const brand = asciiFromBuffer(buffer, 8, 4).toLowerCase()
+    if (['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'hevm', 'hevs'].includes(brand)) return 'image/heic'
+    if (['heif', 'mif1', 'msf1'].includes(brand)) return 'image/heif'
+    if (brand === 'avif' || brand === 'avis') return 'image/avif'
+  }
+  const prefix = buffer.subarray(0, Math.min(buffer.length, 256)).toString('utf8').trimStart().toLowerCase()
+  if (prefix.startsWith('<svg')) return 'image/svg+xml'
+  return undefined
+}
+
+function normalizeImageMimeType(mimeType: string | null | undefined, buffer: Buffer): string {
+  const inferred = inferImageMimeTypeFromBuffer(buffer)
+  if (inferred) return inferred
+  throw new Error('图片数据不是支持的图片格式')
 }
 
 function parseDataUrl(dataUrl: string): { buffer: Buffer, mimeType: string } | null {
   const matches = dataUrl.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/s)
   if (!matches) return null
-  const mimeType = matches[1] || 'image/png'
   const buffer = Buffer.from(matches[2], 'base64')
   if (buffer.length === 0) return null
+  const mimeType = normalizeImageMimeType(matches[1], buffer)
   return { buffer, mimeType }
 }
 
@@ -1277,7 +1320,7 @@ async function fetchBuffer(url: string, timeoutMs: number = 45000) {
 
     return {
       buffer,
-      mimeType: response.headers.get('content-type') || 'image/png',
+      mimeType: normalizeImageMimeType(response.headers.get('content-type'), buffer),
     }
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
@@ -1310,7 +1353,7 @@ async function readImageSource(imageData: string): Promise<{ buffer: Buffer, mim
     }
     return {
       buffer,
-      mimeType: getMimeTypeFromExtension(resolvedPath),
+      mimeType: normalizeImageMimeType(getMimeTypeFromExtension(resolvedPath), buffer),
     }
   }
 
@@ -1320,7 +1363,7 @@ async function readImageSource(imageData: string): Promise<{ buffer: Buffer, mim
   }
   return {
     buffer: rawBuffer,
-    mimeType: 'image/png',
+    mimeType: normalizeImageMimeType(undefined, rawBuffer),
   }
 }
 
@@ -1588,20 +1631,10 @@ ipcMain.handle('read-image-base64', async (_event, localPath: string) => {
     }
 
     const data = fs.readFileSync(filePath)
-    const ext = path.extname(filePath).toLowerCase()
-    const mimeTypes: Record<string, string> = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-      '.mp4': 'video/mp4',
-      '.webm': 'video/webm',
-      '.mov': 'video/quicktime',
-      '.avi': 'video/x-msvideo',
-      '.mkv': 'video/x-matroska',
+    if (data.length === 0) {
+      return { success: false, error: 'File is empty' }
     }
-    const mimeType = mimeTypes[ext] || 'image/png'
+    const mimeType = normalizeImageMimeType(getMimeTypeFromExtension(filePath), data)
     const base64 = `data:${mimeType};base64,${data.toString('base64')}`
 
     return { success: true, base64, mimeType, size: data.length }

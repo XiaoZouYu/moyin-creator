@@ -102,10 +102,11 @@ export function useSClassGeneration() {
   const prepareImageUrls = useCallback(
     async (
       refs: AssetRef[]
-    ): Promise<Array<{ url: string; role: "first_frame" | "last_frame" }>> => {
+    ): Promise<Array<{ url: string; role: "first_frame" | "last_frame"; sourceUrl?: string }>> => {
       const imageWithRoles: Array<{
         url: string;
         role: "first_frame" | "last_frame";
+        sourceUrl?: string;
       }> = [];
 
       for (let i = 0; i < refs.length; i++) {
@@ -119,6 +120,7 @@ export function useSClassGeneration() {
           imageWithRoles.push({
             url: httpUrl,
             role: i === 0 ? "first_frame" : "last_frame",
+            sourceUrl: ref.localUrl || ref.httpUrl || undefined,
           });
         }
       }

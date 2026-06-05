@@ -8,6 +8,32 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
+function asciiAt(bytes: Uint8Array, offset: number, length: number): string {
+  if (bytes.length < offset + length) return '';
+  return String.fromCharCode(...bytes.slice(offset, offset + length));
+}
+
+function inferImageContentType(bytes: Uint8Array): string | null {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) return 'image/png';
+  if (asciiAt(bytes, 0, 4) === 'RIFF' && asciiAt(bytes, 8, 4) === 'WEBP') return 'image/webp';
+  if (asciiAt(bytes, 0, 6) === 'GIF87a' || asciiAt(bytes, 0, 6) === 'GIF89a') return 'image/gif';
+  if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return 'image/bmp';
+  const prefix = new TextDecoder().decode(bytes.slice(0, Math.min(bytes.length, 256))).trimStart().toLowerCase();
+  if (prefix.startsWith('<svg')) return 'image/svg+xml';
+  return null;
+}
+
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get('url');
   
@@ -36,8 +62,16 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const contentType = response.headers.get('content-type') || 'image/png';
     const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    const inferredContentType = inferImageContentType(bytes);
+    const contentType = inferredContentType || '';
+    if (!contentType) {
+      return NextResponse.json(
+        { error: 'Fetched resource is not a supported image' },
+        { status: 415 },
+      );
+    }
 
     return new NextResponse(buffer, {
       headers: {

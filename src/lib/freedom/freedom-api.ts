@@ -31,6 +31,10 @@ import { type AIFeature, useAPIConfigStore } from '@/stores/api-config-store';
 import { useMediaStore } from '@/stores/media-store';
 import { useProjectStore } from '@/stores/project-store';
 import { buildVolcVideoTaskUrls, isVolcArkVideoPlatform } from '@/lib/volc-ark-video';
+import {
+  ensureStructuredCaptionVideoPrompt,
+  shouldRetryWithStructuredCaptionPrompt,
+} from '@/lib/generation/structured-video-prompt';
 import { toast } from 'sonner';
 
 // ==================== Types ====================
@@ -636,7 +640,8 @@ function extractChatCompletionsImage(data: any): string | null {
         return part.image.url;
       }
       if (part.type === 'image' && part.data) {
-        return `data:image/png;base64,${part.data}`;
+        const imageUrl = normalizeRawImageBase64(part.data);
+        if (imageUrl) return imageUrl;
       }
     }
   }
@@ -1807,16 +1812,26 @@ async function generateVideoViaVolc(
   officialArk: boolean,
 ): Promise<GenerationResult> {
   const taskUrls = buildVolcVideoTaskUrls(baseUrl, officialArk);
-  const promptParts = [params.prompt];
-  if (!officialArk) {
+  const buildTextContent = (structuredPrompt: boolean): string => {
+    if (structuredPrompt) {
+      const promptWithParams = [
+        params.prompt,
+        params.resolution ? `Video parameters: resolution ${params.resolution.toLowerCase()}` : '',
+        params.aspectRatio ? `aspect ratio ${params.aspectRatio}` : '',
+        params.duration ? `duration ${params.duration} seconds` : '',
+      ].filter(Boolean).join('. ');
+      return ensureStructuredCaptionVideoPrompt(promptWithParams);
+    }
+
+    if (officialArk) return params.prompt;
+    const promptParts = [params.prompt];
     if (params.resolution) promptParts.push(`--rs ${params.resolution.toLowerCase()}`);
     if (params.aspectRatio) promptParts.push(`--rt ${params.aspectRatio}`);
     if (params.duration) promptParts.push(`--dur ${params.duration}`);
-  }
+    return promptParts.join(' ');
+  };
 
-  const content: Array<Record<string, unknown>> = [
-    { type: 'text', text: promptParts.join(' ') },
-  ];
+  const mediaContent: Array<Record<string, unknown>> = [];
 
   // 附加上传图片：首帧 / 可选尾帧 / 产品参考图。
   // Seedance 2.0 总图片上限按 9 张控制，调用方可进一步限制输入数量。
@@ -1824,52 +1839,78 @@ async function generateVideoViaVolc(
   const primaryFile = grouped.single || grouped.first;
   if (primaryFile) {
     const url = await toVolcImageInputUrl(primaryFile);
-    content.push({ type: 'image_url', image_url: { url }, role: 'first_frame' });
+    mediaContent.push({ type: 'image_url', image_url: { url }, role: 'first_frame' });
   }
   if (grouped.last) {
     const url = await toVolcImageInputUrl(grouped.last);
-    content.push({ type: 'image_url', image_url: { url }, role: 'last_frame' });
+    mediaContent.push({ type: 'image_url', image_url: { url }, role: 'last_frame' });
   }
-  const remainingImageSlots = Math.max(0, 9 - content.filter((item) => item.type === 'image_url').length);
+  const remainingImageSlots = Math.max(0, 9 - mediaContent.filter((item) => item.type === 'image_url').length);
   for (const reference of grouped.references.slice(0, remainingImageSlots)) {
     const url = await toVolcImageInputUrl(reference);
-    content.push({ type: 'image_url', image_url: { url }, role: 'reference_image' });
+    mediaContent.push({ type: 'image_url', image_url: { url }, role: 'reference_image' });
   }
 
-  const body = officialArk
-    ? {
-        model,
-        content,
-        ...(params.duration ? { duration: params.duration } : {}),
-        generate_audio: false,
-        ...(params.aspectRatio ? { ratio: params.aspectRatio } : {}),
-      }
-    : { model, content };
+  const buildContent = (structuredPrompt: boolean): Array<Record<string, unknown>> => [
+    { type: 'text', text: buildTextContent(structuredPrompt) },
+    ...mediaContent,
+  ];
+
+  const buildBody = (structuredPrompt: boolean) => {
+    const content = buildContent(structuredPrompt);
+    return officialArk
+      ? {
+          model,
+          content,
+          ...(params.duration ? { duration: params.duration } : {}),
+          generate_audio: false,
+          ...(params.aspectRatio ? { ratio: params.aspectRatio } : {}),
+        }
+      : { model, content };
+  };
 
   console.log(`[Freedom] Volc video route → POST ${taskUrls.routeLabel}`, {
     model,
     officialArk,
     duration: params.duration,
     ratio: params.aspectRatio,
-    imageCount: content.filter((item) => item.type === 'image_url').length,
-    imageRoles: content
+    imageCount: mediaContent.filter((item) => item.type === 'image_url').length,
+    imageRoles: mediaContent
       .filter((item) => item.type === 'image_url')
       .map((item) => item.role),
   });
 
-  const submitResp = await corsFetch(taskUrls.submit, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!submitResp.ok) {
-    throw toHttpError('Volc submit failed', submitResp.status, await submitResp.text());
-  }
+  const submitTask = async (structuredPrompt: boolean): Promise<any> => {
+    const submitResp = await corsFetch(taskUrls.submit, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(buildBody(structuredPrompt)),
+    });
 
-  const submitData = await submitResp.json();
+    if (!submitResp.ok) {
+      const errorText = await submitResp.text();
+      if (!structuredPrompt && shouldRetryWithStructuredCaptionPrompt(errorText)) {
+        console.warn('[Freedom] Volc requires structured caption prompt; retrying once with style_caption JSON');
+        return submitTask(true);
+      }
+      throw toHttpError('Volc submit failed', submitResp.status, errorText);
+    }
+
+    const data = await submitResp.json();
+    if (!structuredPrompt && (data.status === 'failed' || data.status === 'error')) {
+      const errorText = JSON.stringify(data);
+      if (shouldRetryWithStructuredCaptionPrompt(errorText)) {
+        console.warn('[Freedom] Volc requires structured caption prompt; retrying once with style_caption JSON');
+        return submitTask(true);
+      }
+    }
+    return data;
+  };
+
+  const submitData = await submitTask(false);
   const taskId = submitData.id || submitData.task_id || submitData.data?.id || submitData.data?.task_id;
   if (!taskId) throw new Error('Volc 返回空任务 ID');
 
@@ -2176,7 +2217,10 @@ async function generateVideoViaReplicate(
 function extractImageUrl(data: any): string | null {
   // Handle multiple response formats
   if (data.data?.[0]?.url) return data.data[0].url;
-  if (data.data?.[0]?.b64_json) return `data:image/png;base64,${data.data[0].b64_json}`;
+  if (data.data?.[0]?.b64_json) {
+    const imageUrl = normalizeRawImageBase64(data.data[0].b64_json);
+    if (imageUrl) return imageUrl;
+  }
   if (data.url) return data.url;
   if (data.output?.url) return data.output.url;
   // Replicate: output as direct string URL or array of URLs
@@ -2205,6 +2249,21 @@ function extractVideoUrl(data: any): string | null {
   if (typeof data.remixed_from_video_id === 'string' && data.remixed_from_video_id.startsWith('http')) return data.remixed_from_video_id;
   if (data.response?.url) return data.response.url;  // doubao, jimeng, grok, wan2.6
   return null;
+}
+
+function normalizeRawImageBase64(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const compact = value.trim().replace(/\s+/g, '');
+  const payload = /[-_]/.test(compact)
+    ? compact.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(compact.length / 4) * 4, '=')
+    : compact;
+  try {
+    return normalizeImageDataUrlForApi(
+      compact.startsWith('data:image/') ? compact : `data:image/png;base64,${payload}`,
+    );
+  } catch {
+    return null;
+  }
 }
 
 async function pollForResult(

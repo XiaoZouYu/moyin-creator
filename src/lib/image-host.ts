@@ -9,7 +9,7 @@
 import { useAPIConfigStore, type ImageHostProvider } from '@/stores/api-config-store';
 import { ApiKeyManager, parseApiKeys } from '@/lib/api-key-manager';
 import { corsFetch } from '@/lib/cors-fetch';
-import { mediaUrlToBlob, mediaUrlToDataUrl } from '@/lib/media-source';
+import { dataUrlToBlob, mediaUrlToBlob, mediaUrlToDataUrl } from '@/lib/media-source';
 
 // ==================== Types ====================
 
@@ -123,13 +123,53 @@ function isReadableMediaSource(value: string): boolean {
   );
 }
 
+function bytesStartWith(bytes: Uint8Array, signature: number[]): boolean {
+  if (bytes.length < signature.length) return false;
+  return signature.every((byte, index) => bytes[index] === byte);
+}
+
+function asciiAt(bytes: Uint8Array, offset: number, length: number): string {
+  if (bytes.length < offset + length) return '';
+  return String.fromCharCode(...bytes.slice(offset, offset + length));
+}
+
+function inferImageMimeType(bytes: Uint8Array): string | null {
+  if (bytesStartWith(bytes, [0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (bytesStartWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
+  if (asciiAt(bytes, 0, 4) === 'RIFF' && asciiAt(bytes, 8, 4) === 'WEBP') return 'image/webp';
+  if (asciiAt(bytes, 0, 6) === 'GIF87a' || asciiAt(bytes, 0, 6) === 'GIF89a') return 'image/gif';
+  if (bytesStartWith(bytes, [0x42, 0x4d])) return 'image/bmp';
+  if (
+    bytesStartWith(bytes, [0x49, 0x49, 0x2a, 0x00]) ||
+    bytesStartWith(bytes, [0x49, 0x49, 0x2b, 0x00]) ||
+    bytesStartWith(bytes, [0x4d, 0x4d, 0x00, 0x2a]) ||
+    bytesStartWith(bytes, [0x4d, 0x4d, 0x00, 0x2b])
+  ) return 'image/tiff';
+  const prefix = new TextDecoder().decode(bytes.slice(0, Math.min(bytes.length, 256))).trimStart().toLowerCase();
+  if (prefix.startsWith('<svg')) return 'image/svg+xml';
+  return null;
+}
+
+async function assertImageBlob(blob: Blob, label: string): Promise<void> {
+  const mimeType = (blob.type || '').toLowerCase();
+  if (mimeType && !mimeType.startsWith('image/')) {
+    throw new Error(`${label}不是图片响应，无法上传到图床${mimeType ? `（${mimeType}）` : ''}`);
+  }
+  const bytes = new Uint8Array(await blob.slice(0, 512).arrayBuffer());
+  if (!inferImageMimeType(bytes)) {
+    throw new Error(`${label}不是支持的图片格式，无法上传到图床`);
+  }
+}
+
 async function toUploadFile(imageData: string, name?: string): Promise<{ blob: Blob; filename: string }> {
   let blob: Blob;
 
   if (isReadableMediaSource(imageData)) {
     blob = await mediaUrlToBlob(imageData);
+    await assertImageBlob(blob, '图片源');
   } else {
     blob = base64ToBlob(imageData, 'image/png');
+    await assertImageBlob(blob, '图片数据');
   }
 
   const baseName = (name || 'upload').trim() || 'upload';
@@ -141,11 +181,14 @@ async function toUploadFile(imageData: string, name?: string): Promise<{ blob: B
 async function toBase64Data(imageData: string): Promise<string> {
   if (isReadableMediaSource(imageData)) {
     const dataUrl = await mediaUrlToDataUrl(imageData);
+    const blob = dataUrlToBlob(dataUrl);
+    await assertImageBlob(blob, '图片源');
     const parts = dataUrl.split(',');
     return parts.length === 2 ? parts[1] : dataUrl;
   }
 
   // Assume already base64
+  await assertImageBlob(base64ToBlob(imageData, 'image/png'), '图片数据');
   return imageData;
 }
 

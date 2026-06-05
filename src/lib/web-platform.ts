@@ -476,6 +476,38 @@ async function sourceToBlob(source: string): Promise<Blob> {
   return response.blob()
 }
 
+function bytesStartWith(bytes: Uint8Array, signature: number[]): boolean {
+  if (bytes.length < signature.length) return false
+  return signature.every((byte, index) => bytes[index] === byte)
+}
+
+function asciiAt(bytes: Uint8Array, offset: number, length: number): string {
+  if (bytes.length < offset + length) return ''
+  return String.fromCharCode(...bytes.slice(offset, offset + length))
+}
+
+function inferImageMimeType(bytes: Uint8Array): string | null {
+  if (bytesStartWith(bytes, [0xff, 0xd8, 0xff])) return 'image/jpeg'
+  if (bytesStartWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png'
+  if (asciiAt(bytes, 0, 4) === 'RIFF' && asciiAt(bytes, 8, 4) === 'WEBP') return 'image/webp'
+  if (asciiAt(bytes, 0, 6) === 'GIF87a' || asciiAt(bytes, 0, 6) === 'GIF89a') return 'image/gif'
+  if (bytesStartWith(bytes, [0x42, 0x4d])) return 'image/bmp'
+  const prefix = new TextDecoder().decode(bytes.slice(0, Math.min(bytes.length, 256))).trimStart().toLowerCase()
+  if (prefix.startsWith('<svg')) return 'image/svg+xml'
+  return null
+}
+
+async function assertImageUploadBlob(blob: Blob): Promise<void> {
+  const mimeType = (blob.type || '').toLowerCase()
+  if (mimeType && !mimeType.startsWith('image/')) {
+    throw new Error(`Source is not an image response (${mimeType})`)
+  }
+  const bytes = new Uint8Array(await blob.slice(0, 512).arrayBuffer())
+  if (!inferImageMimeType(bytes)) {
+    throw new Error('Source is not a supported image response')
+  }
+}
+
 function triggerDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
@@ -586,6 +618,7 @@ function extractFirstHttpUrl(value: string): string | undefined {
 
 async function sourceToBase64Payload(source: string): Promise<string> {
   const blob = await sourceToBlob(source)
+  await assertImageUploadBlob(blob)
   const dataUrl = await blobToDataUrl(blob)
   return dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl
 }
@@ -844,6 +877,7 @@ function installImageHostUploader() {
         }
         if (payloadType === 'file') {
           const blob = await sourceToBlob(imageData)
+          await assertImageUploadBlob(blob)
           const filename = ensureExtension(safeFilename(options?.name || 'upload'), blob.type || 'image/png')
           formData.push({
             name: fieldName,

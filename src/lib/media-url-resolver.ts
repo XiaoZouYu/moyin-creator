@@ -79,22 +79,82 @@ const SUPPORTED_API_IMAGE_MIME_TYPES = new Set([
   'image/heif',
 ]);
 
-function normalizeApiImageMimeType(mimeType: string | undefined, payload: string): string {
-  const normalized = (mimeType || '').trim().toLowerCase();
-  if (normalized === 'image/jpg') return 'image/jpeg';
-  if (SUPPORTED_API_IMAGE_MIME_TYPES.has(normalized)) return normalized;
+function assertValidBase64Payload(payload: string): void {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload) || payload.length % 4 === 1) {
+    throw new Error('图片 data URL 包含无效 base64 内容');
+  }
+}
 
-  const prefix = payload.slice(0, 32);
-  if (prefix.startsWith('/9j/')) return 'image/jpeg';
-  if (prefix.startsWith('iVBORw0KGgo')) return 'image/png';
-  if (prefix.startsWith('UklGR')) return 'image/webp';
-  if (prefix.startsWith('R0lGOD')) return 'image/gif';
-  if (prefix.startsWith('Qk')) return 'image/bmp';
-  if (prefix.startsWith('SUkq') || prefix.startsWith('TU0A')) return 'image/tiff';
-  if (prefix.includes('ZnR5cGhlaWM')) return 'image/heic';
-  if (prefix.includes('ZnR5cGhlaWY')) return 'image/heif';
+function decodeBase64Prefix(payload: string, maxBytes = 32): Uint8Array | null {
+  const charCount = Math.min(payload.length, Math.ceil(maxBytes / 3) * 4);
+  let prefix = payload.slice(0, charCount);
+  const remainder = prefix.length % 4;
+  if (remainder !== 0) {
+    prefix += '='.repeat(4 - remainder);
+  }
 
-  return 'image/png';
+  try {
+    const binary = atob(prefix);
+    const length = Math.min(binary.length, maxBytes);
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function bytesStartWith(bytes: Uint8Array, signature: number[]): boolean {
+  if (bytes.length < signature.length) return false;
+  return signature.every((byte, index) => bytes[index] === byte);
+}
+
+function asciiAt(bytes: Uint8Array, offset: number, length: number): string {
+  if (bytes.length < offset + length) return '';
+  let value = '';
+  for (let i = offset; i < offset + length; i += 1) {
+    value += String.fromCharCode(bytes[i]);
+  }
+  return value;
+}
+
+function inferApiImageMimeType(payload: string): string | null {
+  const bytes = decodeBase64Prefix(payload);
+  if (!bytes) return null;
+
+  if (bytesStartWith(bytes, [0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (bytesStartWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
+  if (asciiAt(bytes, 0, 4) === 'RIFF' && asciiAt(bytes, 8, 4) === 'WEBP') return 'image/webp';
+  if (asciiAt(bytes, 0, 6) === 'GIF87a' || asciiAt(bytes, 0, 6) === 'GIF89a') return 'image/gif';
+  if (bytesStartWith(bytes, [0x42, 0x4d])) return 'image/bmp';
+  if (
+    bytesStartWith(bytes, [0x49, 0x49, 0x2a, 0x00]) ||
+    bytesStartWith(bytes, [0x49, 0x49, 0x2b, 0x00]) ||
+    bytesStartWith(bytes, [0x4d, 0x4d, 0x00, 0x2a]) ||
+    bytesStartWith(bytes, [0x4d, 0x4d, 0x00, 0x2b])
+  ) {
+    return 'image/tiff';
+  }
+
+  if (asciiAt(bytes, 4, 4) === 'ftyp') {
+    const brand = asciiAt(bytes, 8, 4).toLowerCase();
+    if (['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'hevm', 'hevs'].includes(brand)) {
+      return 'image/heic';
+    }
+    if (['heif', 'mif1', 'msf1'].includes(brand)) {
+      return 'image/heif';
+    }
+  }
+
+  return null;
+}
+
+function normalizeApiImageMimeType(_mimeType: string | undefined, payload: string): string | null {
+  const inferred = inferApiImageMimeType(payload);
+  if (inferred && SUPPORTED_API_IMAGE_MIME_TYPES.has(inferred)) return inferred;
+  return null;
 }
 
 export function normalizeImageDataUrlForApi(dataUrl: string): string {
@@ -107,8 +167,14 @@ export function normalizeImageDataUrlForApi(dataUrl: string): string {
   if (!payload) {
     throw new Error('图片 data URL 内容为空');
   }
+  assertValidBase64Payload(payload);
 
-  return `data:${normalizeApiImageMimeType(match[1], payload)};base64,${payload}`;
+  const mimeType = normalizeApiImageMimeType(match[1], payload);
+  if (!mimeType) {
+    throw new Error('图片 data URL 不是支持的图片格式');
+  }
+
+  return `data:${mimeType};base64,${payload}`;
 }
 
 export interface ResolveImageToHttpUrlOptions {
@@ -209,12 +275,14 @@ export async function prepareImageReferencesForApi(
     if (!ref) continue;
 
     try {
-      const input = options.forceDataUrl || !isHttpMediaUrl(ref)
+      let input = options.forceDataUrl || !isHttpMediaUrl(ref)
         ? await mediaUrlToDataUrl(ref)
         : ref;
 
       if (options.requireBase64DataUrl && !isHttpMediaUrl(input)) {
-        if (!input.startsWith('data:image/') || !input.includes(';base64,')) {
+        try {
+          input = normalizeImageDataUrlForApi(input);
+        } catch {
           console.warn(`[${logPrefix}] 跳过非 base64 图片引用:`, input.substring(0, 80));
           continue;
         }

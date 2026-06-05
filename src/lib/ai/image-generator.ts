@@ -20,7 +20,7 @@ import {
   resolveProviderImageApiFormat,
 } from '@/lib/ai/provider-platforms';
 import { getUserScopedMediaCategory } from '@/lib/user-session';
-import { mediaUrlToBlob, mediaUrlToDataUrl } from '@/lib/media-url-resolver';
+import { mediaUrlToBlob, mediaUrlToDataUrl, normalizeImageDataUrlForApi } from '@/lib/media-url-resolver';
 
 export interface ImageGenerationParams {
   prompt: string;
@@ -189,8 +189,19 @@ function getImageSizeValue(model: string | undefined, aspectRatio: string): stri
 
 function normalizeBase64Image(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined;
-  if (value.startsWith('data:image/')) return value;
-  return `data:image/png;base64,${value}`;
+  const compact = value.trim().replace(/\s+/g, '');
+  const dataUrl = compact.startsWith('data:image/')
+    ? compact
+    : `data:image/png;base64,${
+        /[-_]/.test(compact)
+          ? compact.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(compact.length / 4) * 4, '=')
+          : compact
+      }`;
+  try {
+    return normalizeImageDataUrlForApi(dataUrl);
+  } catch {
+    return undefined;
+  }
 }
 
 function getAgnesImageInput(referenceImages?: string[]): string | string[] | undefined {
@@ -288,7 +299,7 @@ function image2ResultToImageUrl(result: string, outputFormat?: unknown): string 
   const normalizedBase64 = /[-_]/.test(compact)
     ? compact.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(compact.length / 4) * 4, '=')
     : compact;
-  return `data:image/${mimeFormat};base64,${normalizedBase64}`;
+  return normalizeImageDataUrlForApi(`data:image/${mimeFormat};base64,${normalizedBase64}`);
 }
 
 function isLikelyImageBase64(value: string): boolean {
@@ -313,7 +324,14 @@ function extractImageFromValue(value: unknown, outputFormat?: unknown, keySpecif
   if (typeof value === 'string') {
     const fromText = extractImageFromText(value);
     if (fromText) return fromText;
-    return keySpecific && isLikelyImageBase64(value) ? image2ResultToImageUrl(value, outputFormat) : null;
+    if (keySpecific && isLikelyImageBase64(value)) {
+      try {
+        return image2ResultToImageUrl(value, outputFormat);
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   if (Array.isArray(value)) {
@@ -1435,7 +1453,8 @@ async function submitViaChatCompletions(
       }
       // Some APIs return base64 in data field
       if (part.type === 'image' && part.data) {
-        return { imageUrl: `data:image/png;base64,${part.data}` };
+        const imageUrl = normalizeBase64Image(part.data);
+        if (imageUrl) return { imageUrl };
       }
     }
   }
