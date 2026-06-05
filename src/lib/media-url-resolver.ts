@@ -68,6 +68,49 @@ async function ensureDataUrlMinDimension(dataUrl: string, minDimension?: number)
   return canvas.toDataURL('image/png');
 }
 
+const SUPPORTED_API_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/bmp',
+  'image/tiff',
+  'image/gif',
+  'image/heic',
+  'image/heif',
+]);
+
+function normalizeApiImageMimeType(mimeType: string | undefined, payload: string): string {
+  const normalized = (mimeType || '').trim().toLowerCase();
+  if (normalized === 'image/jpg') return 'image/jpeg';
+  if (SUPPORTED_API_IMAGE_MIME_TYPES.has(normalized)) return normalized;
+
+  const prefix = payload.slice(0, 32);
+  if (prefix.startsWith('/9j/')) return 'image/jpeg';
+  if (prefix.startsWith('iVBORw0KGgo')) return 'image/png';
+  if (prefix.startsWith('UklGR')) return 'image/webp';
+  if (prefix.startsWith('R0lGOD')) return 'image/gif';
+  if (prefix.startsWith('Qk')) return 'image/bmp';
+  if (prefix.startsWith('SUkq') || prefix.startsWith('TU0A')) return 'image/tiff';
+  if (prefix.includes('ZnR5cGhlaWM')) return 'image/heic';
+  if (prefix.includes('ZnR5cGhlaWY')) return 'image/heif';
+
+  return 'image/png';
+}
+
+export function normalizeImageDataUrlForApi(dataUrl: string): string {
+  const match = dataUrl.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.*)$/is);
+  if (!match) {
+    throw new Error('图片 data URL 格式无效，必须是 base64 data URI');
+  }
+
+  const payload = match[2].replace(/\s+/g, '');
+  if (!payload) {
+    throw new Error('图片 data URL 内容为空');
+  }
+
+  return `data:${normalizeApiImageMimeType(match[1], payload)};base64,${payload}`;
+}
+
 export interface ResolveImageToHttpUrlOptions {
   localFallback?: string | null;
   uploadName?: string;
