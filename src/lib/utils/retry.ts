@@ -33,6 +33,7 @@ export function isRateLimitError(error: unknown): boolean {
     message.includes("524") ||
     message.includes("529") ||
     message.includes("fetch failed") ||
+    message.includes("failed to fetch") ||
     message.includes("network error") ||
     message.includes("网络请求失败") ||
     message.includes("网络错误") ||

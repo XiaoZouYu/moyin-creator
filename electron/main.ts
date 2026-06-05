@@ -1100,8 +1100,34 @@ function shouldRetryWithNodeFetch(error: unknown) {
     message.includes('socket hang up') ||
     message.includes('econnreset') ||
     message.includes('other side closed') ||
-    message.includes('fetch failed')
+    message.includes('fetch failed') ||
+    message.includes('failed to fetch') ||
+    message.includes('network error')
   )
+}
+
+async function fetchViaNodeFallbacks(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch (fetchError) {
+    if (init.signal?.aborted) throw fetchError
+    console.warn('[API Fetch] Node fetch failed, retrying with node:http', {
+      url,
+      error: getFetchErrorMessage(fetchError),
+    })
+  }
+
+  try {
+    return await fetchTextViaNodeHttp(url, init)
+  } catch (httpError) {
+    if (init.signal?.aborted) throw httpError
+    console.warn('[API Fetch] node:http failed, retrying with node child fetch', {
+      url,
+      error: getFetchErrorMessage(httpError),
+    })
+  }
+
+  return fetchTextViaNodeCli(url, init)
 }
 
 async function fetchViaElectronNet(url: string, init: RequestInit): Promise<Response> {
@@ -1155,10 +1181,10 @@ async function fetchViaElectronNet(url: string, init: RequestInit): Promise<Resp
         url,
         error: getFetchErrorMessage(error),
       })
-      return fetch(url, init)
+      return fetchViaNodeFallbacks(url, init)
     }
   }
-  return fetch(url, init)
+  return fetchViaNodeFallbacks(url, init)
 }
 
 function resolveImageHostUploadUrl(provider: ImageHostUploadProvider) {
