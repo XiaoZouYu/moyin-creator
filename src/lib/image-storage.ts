@@ -121,6 +121,24 @@ export async function readImageAsBase64(imagePath: string): Promise<string | nul
     return imagePath;
   }
 
+  // In Electron, let the main process read both local and remote image bytes.
+  // This avoids renderer CORS failures and preserves binary data over IPC.
+  if (isElectron()) {
+    try {
+      const result = await window.imageStorage!.readAsBase64(imagePath);
+      if (result.success && result.base64) {
+        return result.base64;
+      }
+      console.error('Failed to read image:', result.error);
+    } catch (error) {
+      console.error('Error reading image as base64:', error);
+    }
+
+    if (!imagePath.startsWith('http://') && !imagePath.startsWith('https://')) {
+      return null;
+    }
+  }
+
   // If it's a remote URL, fetch and convert
   if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
     try {
@@ -142,22 +160,8 @@ export async function readImageAsBase64(imagePath: string): Promise<string | nul
   }
 
   // For local images, use Electron IPC
-  if (!isElectron()) {
-    console.warn('Not running in Electron, cannot read local image');
-    return null;
-  }
-
-  try {
-    const result = await window.imageStorage!.readAsBase64(imagePath);
-    if (result.success && result.base64) {
-      return result.base64;
-    }
-    console.error('Failed to read image:', result.error);
-    return null;
-  } catch (error) {
-    console.error('Error reading image as base64:', error);
-    return null;
-  }
+  console.warn('Not running in Electron, cannot read local image');
+  return null;
 }
 
 /**

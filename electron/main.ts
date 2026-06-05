@@ -1610,34 +1610,13 @@ ipcMain.handle('delete-image', async (_event, localPath: string) => {
   }
 })
 
-// Read local image as base64 (for AI API calls)
+// Read an image source as base64 (for AI API calls)
 ipcMain.handle('read-image-base64', async (_event, localPath: string) => {
   try {
-    let filePath: string
+    const { buffer, mimeType } = await readImageSource(localPath)
+    const base64 = `data:${mimeType};base64,${buffer.toString('base64')}`
 
-    // Handle local-image:// protocol
-    const match = localPath.match(/^local-image:\/\/(.+)\/(.+)$/)
-    if (match) {
-      const [, category, filename] = match
-      filePath = path.join(getMediaRoot(), category, decodeURIComponent(filename))
-    } else if (localPath.startsWith('file://')) {
-      filePath = localPath.replace('file://', '')
-    } else {
-      filePath = localPath
-    }
-
-    if (!fs.existsSync(filePath)) {
-      return { success: false, error: 'File not found' }
-    }
-
-    const data = fs.readFileSync(filePath)
-    if (data.length === 0) {
-      return { success: false, error: 'File is empty' }
-    }
-    const mimeType = normalizeImageMimeType(getMimeTypeFromExtension(filePath), data)
-    const base64 = `data:${mimeType};base64,${data.toString('base64')}`
-
-    return { success: true, base64, mimeType, size: data.length }
+    return { success: true, base64, mimeType, size: buffer.length }
   } catch (error) {
     console.error('Failed to read image:', error)
     return { success: false, error: String(error) }

@@ -3,7 +3,7 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { getFeatureConfig } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
-import { saveVideoToLocal } from "@/lib/image-storage";
+import { readImageAsBase64, saveVideoToLocal } from "@/lib/image-storage";
 import { blobToDataUrl, isHttpMediaUrl, mediaUrlToDataUrl, normalizeImageDataUrlForApi, resolveImageToHttpUrl } from "@/lib/media-url-resolver";
 import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
@@ -837,9 +837,24 @@ async function callVolcVideoApi(
     }
   };
 
+  const formatFetchError = (error: unknown): string => {
+    const message = error instanceof Error ? error.message : String(error);
+    return /failed to fetch/i.test(message) ? '网络请求失败' : message;
+  };
+
   const readVolcImageDataUrl = async (source: string, label: string): Promise<string> => {
+    if (typeof window !== 'undefined' && window.imageStorage?.readAsBase64) {
+      const dataUrl = await readImageAsBase64(source);
+      if (dataUrl) return normalizeVolcImageDataUrl(dataUrl, label);
+    }
+
     if (isHttpMediaUrl(source)) {
-      const response = await corsFetch(source);
+      let response: Response;
+      try {
+        response = await corsFetch(source);
+      } catch (error) {
+        throw new Error(`${label}下载失败：${formatFetchError(error)}`);
+      }
       if (!response.ok) {
         throw new Error(`${label}下载失败：HTTP ${response.status} ${response.statusText || ''}`.trim());
       }
