@@ -2246,23 +2246,6 @@ ipcMain.handle('api-fetch', async (_event, request: ApiFetchRequest): Promise<Ap
   try {
     const url = normalizeApiFetchUrl(request.url)
     const headers = { ...(request.headers || {}) }
-    if (request.responseType === 'base64') {
-      const binary = await fetchBinaryViaNode(url, {
-        method: request.method || 'GET',
-        headers,
-        timeoutMs: request.timeoutMs ?? 600000,
-        signal: controller.signal,
-      })
-      return {
-        ok: binary.ok,
-        status: binary.status,
-        statusText: binary.statusText,
-        headers: binary.headers,
-        body: '',
-        bodyBase64: binary.bodyBase64,
-      }
-    }
-
     const body = buildApiFetchBody(request, headers)
     const response = await fetchViaElectronNet(url, {
       method: request.method || 'GET',
@@ -2274,6 +2257,19 @@ ipcMain.handle('api-fetch', async (_event, request: ApiFetchRequest): Promise<Ap
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value
     })
+
+    if (request.responseType === 'base64') {
+      const buffer = Buffer.from(await response.arrayBuffer())
+      return {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+        body: '',
+        bodyBase64: buffer.toString('base64'),
+      }
+    }
+
     const responseText = await response.text()
     if (/\/responses(?:[/?]|$)/i.test(url)) {
       console.log('[API Fetch] IMAGE2 responses summary', {

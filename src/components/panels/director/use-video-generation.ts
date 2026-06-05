@@ -936,15 +936,22 @@ async function callVolcVideoApi(
   });
 
   const submitTask = async (structuredPrompt: boolean): Promise<unknown> => {
-    const submitResponse = await corsFetch(taskUrls.submit, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(buildRequestBody(prompt, structuredPrompt)),
-    });
+    let submitResponse: Response;
+    try {
+      submitResponse = await corsFetch(taskUrls.submit, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(buildRequestBody(prompt, structuredPrompt)),
+      });
+    } catch (error) {
+      const err = new Error(`视频任务提交失败：${formatFetchError(error)}`) as Error & { status?: number };
+      err.status = 503;
+      throw err;
+    }
 
     if (!submitResponse.ok) {
       const errorText = await submitResponse.text();
@@ -1012,18 +1019,26 @@ async function callVolcVideoApi(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
 
-    const statusResponse = await corsFetch(
-      taskUrls.poll(taskId),
-      {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
+    let statusResponse: Response;
+    try {
+      statusResponse = await corsFetch(
+        taskUrls.poll(taskId),
+        {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          },
+          signal,
         },
-        signal,
-      },
-    );
+      );
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      console.warn('[VideoGen] Volc query network failed, continuing poll:', formatFetchError(error));
+      await sleepOrAbort(pollInterval, signal);
+      continue;
+    }
 
     if (!statusResponse.ok) {
       if (statusResponse.status === 404) throw new Error('任务不存在');

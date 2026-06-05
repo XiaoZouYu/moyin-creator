@@ -42,6 +42,20 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+function summarizeFetchTarget(targetUrl: string): string {
+  try {
+    const url = new URL(targetUrl);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return targetUrl.slice(0, 120);
+  }
+}
+
+function normalizeFetchFailure(error?: string): string {
+  if (!error) return '未知网络错误';
+  return /failed to fetch/i.test(error) ? '网络请求失败' : error;
+}
+
 async function serializeFormData(formData: FormData): Promise<Array<{
   name: string;
   value?: string;
@@ -168,7 +182,9 @@ export async function corsFetch(
     });
 
     if (result.status === 0) {
-      throw new TypeError(result.error || 'Electron main-process API request failed');
+      throw new TypeError(
+        `Electron 主进程请求失败：${init?.method || 'GET'} ${summarizeFetchTarget(targetUrl)}：${normalizeFetchFailure(result.error)}`,
+      );
     }
 
     return new Response(result.bodyBase64 ? base64ToArrayBuffer(result.bodyBase64) : result.body, {
