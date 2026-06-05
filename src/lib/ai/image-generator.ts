@@ -15,7 +15,6 @@ import { corsFetch } from '@/lib/cors-fetch';
 import {
   isAgnesImageModel,
   isAgnesProvider,
-  isAutoVipProvider,
   isImage2ModelName,
   resolveProviderImageApiFormat,
 } from '@/lib/ai/provider-platforms';
@@ -279,6 +278,27 @@ interface ResponsesImageResult {
   outputFormat?: string;
 }
 
+type ImageResponseRecord = Record<string, unknown>;
+
+function asImageResponseRecord(value: unknown): ImageResponseRecord | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as ImageResponseRecord
+    : null;
+}
+
+function getStringishField(record: ImageResponseRecord | null | undefined, fieldName: string): string | undefined {
+  if (!record) return undefined;
+  const value = record[fieldName];
+  if (typeof value === 'string' && value.trim()) return value;
+  if (typeof value === 'number') return String(value);
+  return undefined;
+}
+
+function getResponsesRecordId(record: ImageResponseRecord): string | undefined {
+  const responseRecord = asImageResponseRecord(record.response);
+  return getStringishField(responseRecord, 'id') || getStringishField(record, 'id');
+}
+
 function normalizeImageOutputFormat(format: unknown): string {
   const value = typeof format === 'string' ? format.toLowerCase() : IMAGE2_OUTPUT_FORMAT;
   if (value === 'jpg') return 'jpeg';
@@ -293,7 +313,8 @@ function imageMimeFromFormat(format: unknown): string {
 
 function image2ResultToImageUrl(result: string, outputFormat?: unknown): string {
   const trimmed = result.trim();
-  if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('data:image/')) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith('data:image/')) return normalizeImageDataUrlForApi(trimmed);
   const mimeFormat = imageMimeFromFormat(outputFormat);
   const compact = trimmed.replace(/\s+/g, '');
   const normalizedBase64 = /[-_]/.test(compact)
@@ -302,115 +323,73 @@ function image2ResultToImageUrl(result: string, outputFormat?: unknown): string 
   return normalizeImageDataUrlForApi(`data:image/${mimeFormat};base64,${normalizedBase64}`);
 }
 
-function isLikelyImageBase64(value: string): boolean {
-  const trimmed = value.trim();
-  return trimmed.length > 200 && /^[A-Za-z0-9+/=\s_-]+$/.test(trimmed);
+function normalizeOfficialImageField(value: unknown, outputFormat: unknown, fieldName: string): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') {
+    throw new Error(`${fieldName} 不是字符串，无法作为官方图片结果解析`);
+  }
+  if (value.trim().length === 0) return null;
+  try {
+    return image2ResultToImageUrl(value, outputFormat);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${fieldName} 不是有效图片数据（官方要求该字段是 PNG/JPEG/WebP 图片 base64 或图片 URL）：${message}`);
+  }
 }
 
-function extractImageFromText(value: string): string | null {
-  const dataUrlMatch = value.match(/(data:image\/[^;]+;base64,[A-Za-z0-9+/=_-]+)/);
-  if (dataUrlMatch) return dataUrlMatch[1];
-
-  const markdownMatch = value.match(/!\[[^\]]*]\((https?:\/\/[^)]+)\)/);
-  if (markdownMatch) return markdownMatch[1];
-
-  const imageUrlMatch = value.match(/(https?:\/\/[^\s"')<>]+(?:png|jpe?g|webp|gif|avif|bmp)(?:\?[^\s"')<>]*)?)/i);
-  return imageUrlMatch?.[1] || null;
-}
-
-function extractImageFromValue(value: unknown, outputFormat?: unknown, keySpecific = false, depth = 0): string | null {
-  if (value === null || value === undefined || depth > 8) return null;
-
-  if (typeof value === 'string') {
-    const fromText = extractImageFromText(value);
-    if (fromText) return fromText;
-    if (keySpecific && isLikelyImageBase64(value)) {
-      try {
-        return image2ResultToImageUrl(value, outputFormat);
-      } catch {
-        return null;
-      }
-    }
-    return null;
+function extractOfficialImageFields(
+  record: Record<string, unknown> | null | undefined,
+  outputFormat: unknown,
+  fieldNames: string[],
+  label: string,
+): string | null {
+  if (!record || typeof record !== 'object') return null;
+  for (const fieldName of fieldNames) {
+    if (!(fieldName in record)) continue;
+    const value = normalizeOfficialImageField(record[fieldName], outputFormat, `${label}.${fieldName}`);
+    if (value) return value;
   }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const result = extractImageFromValue(item, outputFormat, keySpecific, depth + 1);
-      if (result) return result;
-    }
-    return null;
-  }
-
-  if (typeof value !== 'object') return null;
-  const record = value as Record<string, unknown>;
-  if (typeof record.type === 'string' && record.type.startsWith('input_')) return null;
-
-  if (record.image_url && typeof record.image_url === 'object' && !Array.isArray(record.image_url)) {
-    const nestedUrl = (record.image_url as Record<string, unknown>).url;
-    const result = extractImageFromValue(nestedUrl, outputFormat, true, depth + 1);
-    if (result) return result;
-  }
-
-  const knownImageKeys = [
-    'result',
-    'image_url',
-    'imageUrl',
-    'url',
-    'output_url',
-    'result_url',
-    'b64_json',
-    'base64',
-    'base64_json',
-    'base64_image',
-    'data_url',
-    'image',
-    'images',
-    'image_urls',
-    'image_base64',
-    'output_image',
-  ];
-
-  for (const key of knownImageKeys) {
-    if (!(key in record)) continue;
-    const result = extractImageFromValue(record[key], outputFormat, true, depth + 1);
-    if (result) return result;
-  }
-
-  const content = record.content;
-  if (Array.isArray(content)) {
-    const result = extractImageFromValue(content, outputFormat, false, depth + 1);
-    if (result) return result;
-  }
-
-  if (typeof record.text === 'string') {
-    const result = extractImageFromText(record.text);
-    if (result) return result;
-  }
-
-  const knownContainerKeys = [
-    'message',
-    'delta',
-    'choice',
-    'choices',
-    'output',
-    'data',
-  ];
-  for (const key of knownContainerKeys) {
-    if (!(key in record)) continue;
-    const result = extractImageFromValue(record[key], outputFormat, false, depth + 1);
-    if (result) return result;
-  }
-
   return null;
 }
 
-function extractResponsesImageItem(item: any, responseId?: string): ResponsesImageResult | null {
-  if (!item || typeof item !== 'object') return null;
-  if (typeof item.type === 'string' && item.type.startsWith('input_')) return null;
+function getOfficialImageTaskId(data: unknown): string | undefined {
+  const record = asImageResponseRecord(data);
+  if (!record) return undefined;
+  const dataField = record.data;
+  const firstItem = Array.isArray(dataField) ? dataField[0] : dataField;
+  const firstItemRecord = asImageResponseRecord(firstItem);
+  return getStringishField(firstItemRecord, 'task_id')
+    || getStringishField(firstItemRecord, 'id')
+    || getStringishField(record, 'task_id')
+    || getStringishField(record, 'id');
+}
 
-  const outputFormat = normalizeImageOutputFormat(item.output_format);
-  const imageUrl = extractImageFromValue(item, outputFormat, true);
+function extractOfficialImagesApiImage(data: unknown, outputFormat: unknown): string | null {
+  const record = asImageResponseRecord(data);
+  if (!record) return null;
+  const dataField = record.data;
+  const firstItem = Array.isArray(dataField) ? dataField[0] : dataField;
+  const firstItemRecord = asImageResponseRecord(firstItem);
+  if (!firstItemRecord) return null;
+
+  const imageUrl = extractOfficialImageFields(firstItemRecord, outputFormat, [
+    'b64_json',
+    'url',
+  ], 'Images API data[0]');
+  return imageUrl;
+}
+
+function extractResponsesImageItem(item: unknown, responseId?: string): ResponsesImageResult | null {
+  const record = asImageResponseRecord(item);
+  if (!record) return null;
+  const itemType = record.type;
+  if (typeof itemType === 'string' && itemType.startsWith('input_')) return null;
+  if (typeof itemType === 'string' && itemType !== 'image_generation_call') return null;
+
+  const outputFormat = normalizeImageOutputFormat(record.output_format);
+  const imageUrl = extractOfficialImageFields(record, outputFormat, [
+    'result',
+  ], 'Responses image_generation_call');
   if (!imageUrl) return null;
 
   return {
@@ -420,47 +399,30 @@ function extractResponsesImageItem(item: any, responseId?: string): ResponsesIma
   };
 }
 
-function extractResponsesImageResult(data: any): ResponsesImageResult | null {
-  if (!data) return null;
+function extractResponsesImageResult(data: unknown): ResponsesImageResult | null {
+  const record = asImageResponseRecord(data);
+  if (!record) return null;
+  const responseRecord = asImageResponseRecord(record.response);
+  const dataRecord = asImageResponseRecord(record.data);
+  const responseId = getResponsesRecordId(record);
 
-  const directItem = extractResponsesImageItem(data.item, data.response?.id || data.id);
+  const topLevelItem = extractResponsesImageItem(record, responseId);
+  if (topLevelItem) return topLevelItem;
+
+  const directItem = extractResponsesImageItem(record.item, responseId);
   if (directItem) return directItem;
 
   const outputGroups = [
-    data.response?.output,
-    data.output,
-    data.data?.output,
-    data.response?.data,
-    data.data,
-    data.images,
-    data.result?.images,
-    data.data?.result?.images,
+    responseRecord?.output,
+    record.output,
+    dataRecord?.output,
   ];
   for (const output of outputGroups) {
     if (!Array.isArray(output)) continue;
     for (const item of output) {
-      const result = extractResponsesImageItem(item, data.response?.id || data.id);
+      const result = extractResponsesImageItem(item, responseId);
       if (result) return result;
     }
-  }
-
-  const topLevelImage = extractImageFromValue({
-    result: data.result,
-    image_url: data.image_url,
-    imageUrl: data.imageUrl,
-    url: data.url,
-    output_url: data.output_url,
-    b64_json: data.b64_json,
-    choices: data.choices,
-    content: data.content,
-    data: Array.isArray(data.data) ? data.data : undefined,
-  }, data.output_format, true);
-  if (topLevelImage) {
-    return {
-      imageUrl: topLevelImage,
-      responseId: data.response?.id || data.id,
-      outputFormat: normalizeImageOutputFormat(data.output_format),
-    };
   }
 
   return null;
@@ -1038,20 +1000,11 @@ async function submitOfficialOpenAIImageTask(params: {
     },
   });
 
-  const imageUrl = extractImageFromValue({
-    data: data.data,
-    url: data.url,
-    image_url: data.image_url,
-    output_url: data.output_url,
-    b64_json: data.b64_json,
-  }, imageOptions.output_format, true);
-
-  const dataField = data.data;
-  const firstItem = Array.isArray(dataField) ? dataField[0] : dataField;
-  const taskId = firstItem?.task_id?.toString()
-    || firstItem?.id?.toString()
-    || data.task_id?.toString()
-    || data.id?.toString();
+  const imageUrl = extractOfficialImagesApiImage(data, imageOptions.output_format);
+  const taskId = getOfficialImageTaskId(data);
+  if (!imageUrl && !taskId) {
+    throw new Error('官方图片 API 响应缺少 data[0].b64_json 或 data[0].url');
+  }
 
   return { imageUrl: imageUrl || undefined, taskId };
 }
@@ -1492,10 +1445,6 @@ async function submitImageTask(
     throw new Error('请先在设置中配置图片生成服务映射');
   }
   assertAgnesImageModelSelected(providerPlatform, model);
-  if (isImage2ModelName(model) && isAutoVipProvider(providerPlatform)) {
-    const result = await submitViaResponsesImage(prompt, apiKey, baseUrl, aspectRatio, referenceImages, keyManager, undefined, undefined, model || IMAGE2_TOOL_MODEL);
-    return { imageUrl: result.imageUrl };
-  }
 
   if (isGptImageModel(model) || isImage2ModelName(model)) {
     return submitOfficialOpenAIImageTask({
