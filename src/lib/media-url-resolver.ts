@@ -75,6 +75,7 @@ const SUPPORTED_API_IMAGE_MIME_TYPES = new Set([
   'image/bmp',
   'image/tiff',
   'image/gif',
+  'image/avif',
   'image/heic',
   'image/heif',
 ]);
@@ -140,6 +141,9 @@ function inferApiImageMimeType(payload: string): string | null {
 
   if (asciiAt(bytes, 4, 4) === 'ftyp') {
     const brand = asciiAt(bytes, 8, 4).toLowerCase();
+    if (['avif', 'avis'].includes(brand)) {
+      return 'image/avif';
+    }
     if (['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'hevm', 'hevs'].includes(brand)) {
       return 'image/heic';
     }

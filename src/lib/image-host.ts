@@ -139,6 +139,10 @@ function inferImageMimeType(bytes: Uint8Array): string | null {
   if (asciiAt(bytes, 0, 4) === 'RIFF' && asciiAt(bytes, 8, 4) === 'WEBP') return 'image/webp';
   if (asciiAt(bytes, 0, 6) === 'GIF87a' || asciiAt(bytes, 0, 6) === 'GIF89a') return 'image/gif';
   if (bytesStartWith(bytes, [0x42, 0x4d])) return 'image/bmp';
+  if (asciiAt(bytes, 4, 4) === 'ftyp') {
+    const brand = asciiAt(bytes, 8, 4).toLowerCase();
+    if (['avif', 'avis'].includes(brand)) return 'image/avif';
+  }
   if (
     bytesStartWith(bytes, [0x49, 0x49, 0x2a, 0x00]) ||
     bytesStartWith(bytes, [0x49, 0x49, 0x2b, 0x00]) ||
