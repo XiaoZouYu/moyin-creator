@@ -79,6 +79,11 @@ const SUPPORTED_API_IMAGE_MIME_TYPES = new Set([
   'image/heif',
 ]);
 
+const SD2_COMPATIBLE_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+]);
+
 function assertValidBase64Payload(payload: string): void {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload) || payload.length % 4 === 1) {
     throw new Error('图片 data URL 包含无效 base64 内容');
@@ -177,6 +182,85 @@ export function normalizeImageDataUrlForApi(dataUrl: string): string {
   return `data:${mimeType};base64,${payload}`;
 }
 
+function getDataUrlMimeType(dataUrl: string): string {
+  return dataUrl.match(/^data:([^;,]+)/i)?.[1]?.toLowerCase() || '';
+}
+
+function normalizeOutputMimeType(mimeType?: string): 'image/png' | 'image/jpeg' {
+  const normalized = (mimeType || '').toLowerCase();
+  return normalized === 'image/jpeg' || normalized === 'image/jpg' ? 'image/jpeg' : 'image/png';
+}
+
+async function reencodeImageDataUrl(
+  dataUrl: string,
+  outputMimeType: 'image/png' | 'image/jpeg',
+  quality = 0.92,
+): Promise<string> {
+  if (typeof document === 'undefined') {
+    throw new Error('当前运行环境无法重新编码图片');
+  }
+
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('无法解码图片'));
+    img.src = dataUrl;
+  });
+
+  if (!image.naturalWidth || !image.naturalHeight) {
+    throw new Error('图片尺寸无效');
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('无法创建图片画布');
+  if (outputMimeType === 'image/jpeg') {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  ctx.drawImage(image, 0, 0);
+  return canvas.toDataURL(outputMimeType, quality);
+}
+
+export interface NormalizeImageSourceForApiOptions {
+  outputMimeType?: 'image/png' | 'image/jpeg';
+  compatibleMimeTypes?: Set<string>;
+  forceReencode?: boolean;
+}
+
+export async function normalizeImageSourceToDataUrlForApi(
+  source: string,
+  options: NormalizeImageSourceForApiOptions = {},
+): Promise<string> {
+  const dataUrl = isDataUrl(source) ? source : await mediaUrlToDataUrl(source);
+  const outputMimeType = normalizeOutputMimeType(options.outputMimeType);
+  const compatibleMimeTypes = options.compatibleMimeTypes || SD2_COMPATIBLE_IMAGE_MIME_TYPES;
+
+  let normalized: string | null = null;
+  let normalizeError: unknown = null;
+  try {
+    normalized = normalizeImageDataUrlForApi(dataUrl);
+    const mimeType = getDataUrlMimeType(normalized);
+    if (!options.forceReencode && compatibleMimeTypes.has(mimeType)) {
+      return normalized;
+    }
+  } catch (error) {
+    normalizeError = error;
+  }
+
+  try {
+    const reencoded = await reencodeImageDataUrl(dataUrl, outputMimeType);
+    return normalizeImageDataUrlForApi(reencoded);
+  } catch (error) {
+    const normalizedMessage = normalizeError instanceof Error ? normalizeError.message : String(normalizeError || '');
+    const reencodeMessage = error instanceof Error ? error.message : String(error);
+    const detail = [normalizedMessage, reencodeMessage].filter(Boolean).join('；');
+    throw new Error(`图片不是可解码的 SD2.0 兼容格式${detail ? `：${detail}` : ''}`);
+  }
+}
+
 export interface ResolveImageToHttpUrlOptions {
   localFallback?: string | null;
   uploadName?: string;
@@ -188,7 +272,8 @@ export interface ResolveImageToHttpUrlOptions {
 }
 
 async function uploadDataUrlToImageHost(dataUrl: string, options: ResolveImageToHttpUrlOptions): Promise<string> {
-  const preparedDataUrl = await ensureDataUrlMinDimension(dataUrl, options.minDimension);
+  const normalizedDataUrl = await normalizeImageSourceToDataUrlForApi(dataUrl);
+  const preparedDataUrl = await ensureDataUrlMinDimension(normalizedDataUrl, options.minDimension);
   const result = await uploadToImageHost(preparedDataUrl, {
     name: options.uploadName?.trim() || `media_ref_${Date.now()}`,
     expiration: 15552000,
@@ -239,7 +324,7 @@ export async function resolveImageToHttpUrl(
         throw new Error(`${label}需要重新上传外部 HTTP 图片，但图床未配置，请先在设置中启用 Catbox 或其他可用图床`);
       }
       console.log(`[${logPrefix}] ${label}: re-uploading external HTTP image before API submission`);
-      return uploadDataUrlToImageHost(await mediaUrlToDataUrl(url), options);
+      return uploadDataUrlToImageHost(await normalizeImageSourceToDataUrlForApi(url), options);
     }
 
     if (isDiscouragedExternalImageUrl(url)) {
@@ -252,7 +337,7 @@ export async function resolveImageToHttpUrl(
     throw new Error('图床未配置，请先在设置中启用 Catbox 或其他可用图床');
   }
 
-  return uploadDataUrlToImageHost(await mediaUrlToDataUrl(url), options);
+  return uploadDataUrlToImageHost(await normalizeImageSourceToDataUrlForApi(url), options);
 }
 
 export interface PrepareImageReferencesForApiOptions {
@@ -275,8 +360,8 @@ export async function prepareImageReferencesForApi(
     if (!ref) continue;
 
     try {
-      let input = options.forceDataUrl || !isHttpMediaUrl(ref)
-        ? await mediaUrlToDataUrl(ref)
+      let input = options.forceDataUrl || options.requireBase64DataUrl || !isHttpMediaUrl(ref)
+        ? await normalizeImageSourceToDataUrlForApi(ref)
         : ref;
 
       if (options.requireBase64DataUrl && !isHttpMediaUrl(input)) {

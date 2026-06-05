@@ -4,7 +4,7 @@
 import { getFeatureConfig } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
 import { saveVideoToLocal } from "@/lib/image-storage";
-import { mediaUrlToDataUrl, normalizeImageDataUrlForApi, resolveImageToHttpUrl } from "@/lib/media-url-resolver";
+import { normalizeImageSourceToDataUrlForApi, resolveImageToHttpUrl } from "@/lib/media-url-resolver";
 import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
@@ -833,7 +833,7 @@ async function callVolcVideoApi(
     let lastError: unknown = null;
     for (const source of [...new Set(sources)]) {
       try {
-        return normalizeImageDataUrlForApi(await mediaUrlToDataUrl(source));
+        return normalizeImageSourceToDataUrlForApi(source);
       } catch (error) {
         lastError = error;
         console.warn('[VideoGen] Volc image source conversion failed, trying fallback', {

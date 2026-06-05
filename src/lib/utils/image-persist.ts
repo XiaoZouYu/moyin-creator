@@ -3,27 +3,56 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 /**
  * Image Persist Utility
- * Saves scene images to local storage and optionally uploads to image host.
+ * Saves scene images to Electron local storage or OSS-backed HTTP URLs on Web.
  * Eliminates base64 data from Zustand state persistence.
  */
 
 import { saveImageToLocal, type ImageCategory } from '@/lib/image-storage';
 import { uploadToImageHost, isImageHostConfigured } from '@/lib/image-host';
+import { normalizeImageSourceToDataUrlForApi } from '@/lib/media-url-resolver';
 
 export interface PersistResult {
-  /** local-image:// path for state storage */
+  /** local-image:// in Electron, OSS HTTP URL in Web */
   localPath: string;
-  /** HTTP URL from image host (null if not configured or upload failed) */
+  /** HTTP URL for API reuse */
   httpUrl: string | null;
 }
 
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function isWebBrowserRuntime(): boolean {
+  return typeof window !== 'undefined'
+    && !window.ipcRenderer
+    && !(navigator.userAgent || '').includes('Electron');
+}
+
+async function saveImageForPersistence(
+  imageData: string,
+  category: ImageCategory,
+  filename: string,
+): Promise<string> {
+  const normalizedImage = await normalizeImageSourceToDataUrlForApi(imageData);
+  const localPath = await saveImageToLocal(normalizedImage, category, filename);
+
+  if (isWebBrowserRuntime()) {
+    if (!isHttpUrl(localPath)) {
+      throw new Error('OSS 媒体上传失败：Web 端不能保存浏览器本地图片，请检查生产环境 __cloud_media/OSS 配置');
+    }
+    return localPath;
+  }
+
+  return localPath;
+}
+
 /**
- * Persist a scene image: save to local filesystem + optionally upload to image host.
+ * Persist a scene image.
  *
  * Input can be:
  * - base64 data URI (data:image/...)
- * - HTTP URL (will be downloaded then saved locally)
- * - local-image:// (already persisted, skip save)
+ * - HTTP URL (will be downloaded and re-hosted on Web)
+ * - local-image:// (already persisted in Electron; re-hosted on Web)
  *
  * @param imageData - The image data (base64 / URL / local-image://)
  * @param sceneId - Scene index for filename generation
@@ -36,8 +65,10 @@ export async function persistSceneImage(
   frameType: 'first' | 'end' = 'first',
   category: ImageCategory = 'shots'
 ): Promise<PersistResult> {
-  // Already persisted locally — skip saving
-  if (imageData.startsWith('local-image://')) {
+  const strictCloudMedia = isWebBrowserRuntime();
+
+  // Already persisted locally in Electron — skip saving.
+  if (!strictCloudMedia && imageData.startsWith('local-image://')) {
     return { localPath: imageData, httpUrl: null };
   }
 
@@ -49,10 +80,14 @@ export async function persistSceneImage(
   const timestamp = Date.now();
   const filename = `scene_${sceneId}_${frameType}_${timestamp}.png`;
 
-  // Save to local filesystem (returns local-image:// or original URL as fallback)
-  const localPath = await saveImageToLocal(imageData, category, filename);
+  // In Web this uploads to OSS and returns its HTTP URL. In Electron this returns local-image://.
+  const localPath = await saveImageForPersistence(imageData, category, filename);
 
-  // Optionally upload to image host (non-blocking, best-effort)
+  if (strictCloudMedia) {
+    return { localPath, httpUrl: localPath };
+  }
+
+  // Optionally upload to image host for desktop/local images.
   let httpUrl: string | null = null;
   if (isImageHostConfigured()) {
     try {
@@ -80,7 +115,9 @@ export async function persistReferenceImage(
   label: string,
   category: ImageCategory = 'scenes'
 ): Promise<PersistResult> {
-  if (imageData.startsWith('local-image://')) {
+  const strictCloudMedia = isWebBrowserRuntime();
+
+  if (!strictCloudMedia && imageData.startsWith('local-image://')) {
     return { localPath: imageData, httpUrl: null };
   }
 
@@ -91,7 +128,11 @@ export async function persistReferenceImage(
   const timestamp = Date.now();
   const filename = `ref_${label}_${timestamp}.png`;
 
-  const localPath = await saveImageToLocal(imageData, category, filename);
+  const localPath = await saveImageForPersistence(imageData, category, filename);
+
+  if (strictCloudMedia) {
+    return { localPath, httpUrl: localPath };
+  }
 
   let httpUrl: string | null = null;
   if (isImageHostConfigured()) {
