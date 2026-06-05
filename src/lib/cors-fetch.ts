@@ -33,6 +33,15 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
 async function serializeFormData(formData: FormData): Promise<Array<{
   name: string;
   value?: string;
@@ -154,6 +163,7 @@ export async function corsFetch(
       url: targetUrl,
       method: init?.method,
       headers,
+      responseType: 'base64',
       ...serializedBody,
     });
 
@@ -161,7 +171,7 @@ export async function corsFetch(
       throw new TypeError(result.error || 'Electron main-process API request failed');
     }
 
-    return new Response(result.body, {
+    return new Response(result.bodyBase64 ? base64ToArrayBuffer(result.bodyBase64) : result.body, {
       status: result.status,
       statusText: result.statusText,
       headers: result.headers,
