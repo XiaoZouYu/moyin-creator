@@ -17,10 +17,15 @@ import {
   parseApiKeys,
   maskApiKey as maskKey,
   updateProviderKeys,
-  classifyModelByName,
 } from '@/lib/api-key-manager';
 import { injectDiscoveryCache, type DiscoveredModelLimits } from '@/lib/ai/model-registry';
 import {
+  AGNES_BASE_URL,
+  AGNES_DEFAULT_MODELS,
+  AGNES_NAME,
+  buildAgnesModelMetadata,
+  isAgnesPlatform,
+  normalizeAgnesModelList,
   AUTO_VIP_BASE_URL,
   AUTO_VIP_NAME,
   AUTO_VIP_PLATFORM,
@@ -33,7 +38,6 @@ import { corsFetch } from '@/lib/cors-fetch';
 import {
   VOLC_ARK_SEEDANCE_MODEL_ID,
   VOLC_ARK_VIDEO_BASE_URL,
-  VOLC_ARK_VIDEO_PLATFORM,
   isVolcArkVideoPlatform,
 } from '@/lib/volc-ark-video';
 import { fileStorage } from '@/lib/indexed-db-storage';
@@ -561,6 +565,16 @@ function omitRecordKeys<T>(record: Record<string, T>, keys: Iterable<string>): R
 
 function normalizeKnownProvider<T extends Omit<IProvider, 'id'> | IProvider>(provider: T): T {
   const builtInProvider = normalizeBuiltInProvider(provider);
+  if (isAgnesPlatform(builtInProvider.platform)) {
+    const models = normalizeAgnesModelList(builtInProvider.model);
+    return {
+      ...builtInProvider,
+      name: builtInProvider.name?.trim() || AGNES_NAME,
+      baseUrl: AGNES_BASE_URL,
+      model: models,
+      capabilities: ['text', 'image_generation', 'video_generation'],
+    } as T;
+  }
   if (!isVolcArkVideoPlatform(builtInProvider.platform)) return builtInProvider;
   const models = builtInProvider.model?.length ? builtInProvider.model : [VOLC_ARK_SEEDANCE_MODEL_ID];
   return {
@@ -585,6 +599,16 @@ function buildVolcArkVideoMetadata(models: string[]) {
   }
 
   return { modelEndpointTypes, modelTypes, modelTags };
+}
+
+function buildKnownProviderMetadata(provider: Pick<IProvider, 'platform' | 'model'>) {
+  if (isVolcArkVideoPlatform(provider.platform)) {
+    return buildVolcArkVideoMetadata(provider.model);
+  }
+  if (isAgnesPlatform(provider.platform)) {
+    return buildAgnesModelMetadata(provider.model?.length ? provider.model : AGNES_DEFAULT_MODELS);
+  }
+  return null;
 }
 
 const initialState: APIConfigState = {
@@ -618,16 +642,14 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           ...normalizedProviderData,
           id: generateId(),
         };
-        const volcArkMetadata = isVolcArkVideoPlatform(newProvider.platform)
-          ? buildVolcArkVideoMetadata(newProvider.model)
-          : null;
+        const knownProviderMetadata = buildKnownProviderMetadata(newProvider);
         set((state) => ({
           providers: [...state.providers, newProvider],
-          ...(volcArkMetadata
+          ...(knownProviderMetadata
             ? {
-                modelEndpointTypes: { ...state.modelEndpointTypes, ...volcArkMetadata.modelEndpointTypes },
-                modelTypes: { ...state.modelTypes, ...volcArkMetadata.modelTypes },
-                modelTags: { ...state.modelTags, ...volcArkMetadata.modelTags },
+                modelEndpointTypes: { ...state.modelEndpointTypes, ...knownProviderMetadata.modelEndpointTypes },
+                modelTypes: { ...state.modelTypes, ...knownProviderMetadata.modelTypes },
+                modelTags: { ...state.modelTags, ...knownProviderMetadata.modelTags },
               }
             : {}),
         }));
@@ -639,16 +661,14 @@ export const useAPIConfigStore = create<APIConfigStore>()(
 
       updateProvider: (provider) => {
         const normalizedProvider = normalizeKnownProvider(provider) as IProvider;
-        const volcArkMetadata = isVolcArkVideoPlatform(normalizedProvider.platform)
-          ? buildVolcArkVideoMetadata(normalizedProvider.model)
-          : null;
+        const knownProviderMetadata = buildKnownProviderMetadata(normalizedProvider);
         set((state) => ({
           providers: state.providers.map(p => p.id === normalizedProvider.id ? normalizedProvider : p),
-          ...(volcArkMetadata
+          ...(knownProviderMetadata
             ? {
-                modelEndpointTypes: { ...state.modelEndpointTypes, ...volcArkMetadata.modelEndpointTypes },
-                modelTypes: { ...state.modelTypes, ...volcArkMetadata.modelTypes },
-                modelTags: { ...state.modelTags, ...volcArkMetadata.modelTags },
+                modelEndpointTypes: { ...state.modelEndpointTypes, ...knownProviderMetadata.modelEndpointTypes },
+                modelTypes: { ...state.modelTypes, ...knownProviderMetadata.modelTypes },
+                modelTags: { ...state.modelTags, ...knownProviderMetadata.modelTags },
               }
             : {}),
         }));

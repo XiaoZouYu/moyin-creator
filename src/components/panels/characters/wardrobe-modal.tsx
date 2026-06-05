@@ -767,6 +767,7 @@ async function generateVariationImage(params: {
     prompt,
     apiKey,
     baseUrl,
+    providerPlatform: featureConfig.platform,
     aspectRatio: '1:1',
     resolution: '2K',
     referenceImages: referenceImages.length > 0 ? referenceImages : undefined,

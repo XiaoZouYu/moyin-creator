@@ -24,8 +24,10 @@ import { useMediaStore } from "@/stores/media-store";
 import { corsFetch } from "@/lib/cors-fetch";
 import { getApiKeyCount, parseApiKeys, maskApiKey } from "@/lib/api-key-manager";
 import {
+  AGNES_PLATFORM,
   AUTO_VIP_PLATFORM,
   CHUNFENG_PLATFORM,
+  isAgnesPlatform,
   isAutoVipPlatform,
   isChunfengPlatform,
 } from "@/lib/ai/provider-platforms";
@@ -68,8 +70,8 @@ import {
   X,
   Loader2,
   MessageSquare,
+  Sparkles,
   Zap,
-  ScanEye,
   Info,
   Image,
   RotateCcw,
@@ -96,6 +98,7 @@ const PLATFORM_ICONS: Record<string, React.ReactNode> = {
   aggregator: <Zap className="h-5 w-5" />,
   [AUTO_VIP_PLATFORM]: <Zap className="h-5 w-5" />,
   [CHUNFENG_PLATFORM]: <MessageSquare className="h-5 w-5" />,
+  [AGNES_PLATFORM]: <Sparkles className="h-5 w-5" />,
   runninghub: <Image className="h-5 w-5" />,
   custom: <Settings className="h-5 w-5" />,
 };
@@ -251,7 +254,7 @@ export function SettingsPanel() {
         return;
       }
 
-      if (isAutoVipPlatform(provider.platform) || isChunfengPlatform(provider.platform)) {
+      if (isAutoVipPlatform(provider.platform) || isChunfengPlatform(provider.platform) || isAgnesPlatform(provider.platform)) {
         if (!normalizedBaseUrl) {
           toast.error("请先配置 Base URL");
           setTestingProvider(null);

@@ -16,7 +16,14 @@ import {
 } from '@/lib/ai/feature-router';
 import { submitGridImageRequest } from '@/lib/ai/image-generator';
 import { resolveImageApiFormat } from '@/lib/api-key-manager';
-import { isImage2ModelName, resolveProviderImageApiFormat } from '@/lib/ai/provider-platforms';
+import {
+  AGNES_VIDEO_LAST_FRAME_UNSUPPORTED_MESSAGE,
+  isAgnesImageModel,
+  isAgnesProvider,
+  isAgnesVideoModel,
+  isImage2ModelName,
+  resolveProviderImageApiFormat,
+} from '@/lib/ai/provider-platforms';
 import { corsFetch } from '@/lib/cors-fetch';
 import { readImageAsBase64 } from '@/lib/image-storage';
 import { uploadBase64Image } from '@/lib/utils/image-upload';
@@ -202,7 +209,7 @@ function resolveFreedomFeatureConfig(
   return { config: null, source: feature };
 }
 
-type FreedomImageRoute = 'midjourney' | 'ideogram' | 'kling_image' | 'openai_chat' | 'openai_responses_image' | 'openai_images' | 'replicate';
+type FreedomImageRoute = 'midjourney' | 'ideogram' | 'agnes' | 'kling_image' | 'openai_chat' | 'openai_responses_image' | 'openai_images' | 'replicate';
 
 type FreedomImageReferenceMode = 'midjourney_base64' | 'openai_multimodal' | 'generic_image_urls' | 'none';
 
@@ -230,6 +237,9 @@ function detectFreedomImageRoute(
   if (/^ideogram_/i.test(model)) {
     return 'ideogram';
   }
+  if (isAgnesProvider(platform) && isAgnesImageModel(model)) {
+    return 'agnes';
+  }
   // Kling image: 模型名检测 + 端点元数据检测
   if (/^kling-(image|omni-image)/i.test(model) || hasExactEndpoint('kling生图') || hasExactEndpoint('omni-image') || hasExactEndpoint('文生图')) {
     return 'kling_image';
@@ -255,6 +265,7 @@ function getFreedomImageReferenceMode(
   endpointTypes?: string[],
 ): FreedomImageReferenceMode {
   if (route === 'midjourney') return 'midjourney_base64';
+  if (route === 'agnes') return 'generic_image_urls';
   if (route === 'openai_chat' || route === 'openai_responses_image') return 'openai_multimodal';
   if (route === 'openai_images') {
     if (isFreedomGptImageModel(model)) return 'generic_image_urls';
@@ -306,7 +317,7 @@ async function resolveFreedomImageReferences(
   return resolved;
 }
 
-type FreedomVideoRoute = 'openai_official' | 'unified' | 'volc' | 'volc_ark' | 'wan' | 'kling' | 'replicate';
+type FreedomVideoRoute = 'openai_official' | 'unified' | 'agnes' | 'volc' | 'volc_ark' | 'wan' | 'kling' | 'replicate';
 
 const FREEDOM_VIDEO_ROUTE_MAP: Record<string, FreedomVideoRoute> = {
   'openAI官方视频格式': 'openai_official',
@@ -388,6 +399,7 @@ function getUnifiedEndpointPaths(endpointTypes: string[]): { submit: string; pol
 }
 
 function detectFreedomVideoRoute(model: string, endpointTypes?: string[], platform?: string): FreedomVideoRoute {
+  if (isAgnesProvider(platform) && isAgnesVideoModel(model)) return 'agnes';
   if (isVolcArkVideoPlatform(platform)) return 'volc_ark';
 
   if (endpointTypes && endpointTypes.length > 0) {
@@ -453,6 +465,11 @@ async function _generateFreedomImageInner(
     toast.error(message);
     throw new Error(message);
   }
+  if (isAgnesProvider(config.platform) && !isAgnesImageModel(model)) {
+    const message = '当前自由板块图片服务选择的是 Agnes AI，但所选模型不是 Agnes 图片模型。请改用 agnes-image-2.1-flash / agnes-image-2.0-flash，或选择其他支持图片生成的供应商。';
+    toast.error(message);
+    throw new Error(message);
+  }
   const normalizedBase = baseUrl.replace(/\/+$/, '');
 
   // ── Smart Routing: choose endpoint based on model metadata ──
@@ -478,6 +495,9 @@ async function _generateFreedomImageInner(
   }
   if (route === 'ideogram') {
     return generateViaIdeogramEndpoint(params, model, apiKey, normalizedBase);
+  }
+  if (route === 'agnes') {
+    return generateViaAgnesImagesEndpoint(params, model, apiKey, normalizedBase);
   }
   if (route === 'openai_responses_image') {
     return generateViaResponsesImage(params, model, apiKey, normalizedBase, config.keyManager, config.platform);
@@ -724,6 +744,94 @@ async function generateViaImagesEndpoint(
 
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
   return { url: imageUrl, taskId: data.task_id, mediaId };
+}
+
+function getAgnesImageInput(referenceImages: ResolvedFreedomImageReference[]): string | string[] | undefined {
+  const images = referenceImages.map((ref) => ref.inputUrl).filter(Boolean);
+  if (images.length === 0) return undefined;
+  return images.length === 1 ? images[0] : images;
+}
+
+function getAgnesImageSize(params: FreedomImageParams): string {
+  if (params.size) return params.size;
+  if (params.width && params.height) return `${params.width}x${params.height}`;
+  const ratio = params.aspectRatio || '1:1';
+  const isPortrait = ratio === '9:16' || ratio === '3:4';
+  const isWide = ratio === '16:9' || ratio === '4:3' || ratio === '21:9';
+  if (isPortrait) return '1024x1536';
+  if (isWide) return '1536x1024';
+  return '1024x1024';
+}
+
+function assertFreedomAgnesImageInputsSupported(params: FreedomImageParams): void {
+  const unsupported: string[] = [];
+  if ((params.referenceImages || []).filter((ref) => !!ref.url).length > 1) {
+    unsupported.push('多张参考图');
+  }
+  if (params.negativePrompt?.trim()) {
+    unsupported.push('负面提示词');
+  }
+
+  const extraParams = params.extraParams || {};
+  const allowedExtraParams = new Set(['size', 'n']);
+  for (const key of Object.keys(extraParams)) {
+    if (!allowedExtraParams.has(key)) unsupported.push(`高级参数 ${key}`);
+  }
+  if (extraParams.n != null && Number(extraParams.n) !== 1) {
+    unsupported.push('多图数量 n>1');
+  }
+
+  if (unsupported.length === 0) return;
+  throw new Error(`Agnes Image 目前只接入单张参考图、size 和 n=1；当前请求包含不支持的内容：${unsupported.join('、')}。请移除这些内容，或选择支持它们的图片模型。`);
+}
+
+async function generateViaAgnesImagesEndpoint(
+  params: FreedomImageParams,
+  model: string,
+  apiKey: string,
+  baseUrl: string,
+): Promise<GenerationResult> {
+  assertFreedomAgnesImageInputsSupported(params);
+  const endpoint = buildEndpoint(baseUrl, 'images/generations');
+  const referenceImages = await resolveFreedomImageReferences(params.referenceImages, { preferHttpUrl: true });
+  const body: Record<string, any> = {
+    model,
+    prompt: params.prompt,
+    n: 1,
+    size: getAgnesImageSize(params),
+  };
+  const imageInput = getAgnesImageInput(referenceImages);
+  if (imageInput) body.image = imageInput;
+  if (params.extraParams) Object.assign(body, params.extraParams);
+
+  const response = await corsFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw toHttpError('Agnes image generation failed', response.status, await response.text());
+  }
+
+  const data = await response.json();
+  let imageUrl = extractImageUrl(data);
+  const taskId = data.task_id || data.id || data.data?.[0]?.task_id || data.data?.[0]?.id;
+  if (!imageUrl && taskId) {
+    imageUrl = await pollForResult(
+      buildEndpoint(baseUrl, `images/generations/${taskId}`),
+      apiKey,
+      IMAGE_POLL_INTERVAL,
+      IMAGE_POLL_MAX_ATTEMPTS,
+    );
+  }
+  if (!imageUrl) throw new Error('Agnes 图片接口未返回图片 URL');
+
+  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  return { url: imageUrl, taskId: taskId ? String(taskId) : undefined, mediaId };
 }
 
 /**
@@ -1143,7 +1251,17 @@ async function _generateFreedomVideoInner(
   // 每次重试动态取当前 key（利用 keyManager rotate 后的新 key）
   const apiKey = config.keyManager?.getCurrentKey?.() || config.apiKey;
   // 模型 ID 直接透传：UI 选的就是供应商原始 ID，无需转换
-  const model = params.model || defaultModel;
+  const model = (params.model || defaultModel || '').trim();
+  if (!model) {
+    const message = '自由板块视频生成未选择模型：请在设置的服务映射中为「自由板块-视频」或「视频生成」选择具体模型';
+    toast.error(message);
+    throw new Error(message);
+  }
+  if (isAgnesProvider(config.platform) && !isAgnesVideoModel(model)) {
+    const message = '当前自由板块视频服务选择的是 Agnes AI，但所选模型不是 Agnes Video v2.0。请改用 agnes-video-v2.0，或选择其他支持视频生成的供应商。';
+    toast.error(message);
+    throw new Error(message);
+  }
 
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
   const route = detectFreedomVideoRoute(model, endpointTypes, config.platform);
@@ -1158,6 +1276,9 @@ async function _generateFreedomVideoInner(
   switch (route) {
     case 'openai_official':
       result = await generateVideoViaOpenAIOfficial(params, model, apiKey, baseUrl);
+      break;
+    case 'agnes':
+      result = await generateVideoViaAgnes(params, model, apiKey, baseUrl);
       break;
     case 'volc':
       result = await generateVideoViaVolc(params, model, apiKey, baseUrl, false);
@@ -1446,6 +1567,93 @@ async function generateVideoViaOpenAIOfficial(
   }
 
   throw new Error('Sora 生成超时');
+}
+
+function getAgnesVideoTaskId(data: any): string | undefined {
+  return (
+    data.task_id ||
+    data.id ||
+    data.video_id ||
+    data.data?.task_id ||
+    data.data?.id ||
+    data.response?.task_id ||
+    data.response?.id ||
+    data.result?.task_id ||
+    data.result?.id
+  )?.toString();
+}
+
+function assertFreedomAgnesVideoInputsSupported(grouped: ReturnType<typeof groupVideoUploadFiles>): void {
+  const unsupported: string[] = [];
+  if (grouped.last) unsupported.push('尾帧图');
+  if (grouped.references.length > 0) unsupported.push('参考图');
+  if (grouped.single && grouped.first) unsupported.push('同时上传单图和首帧图');
+  if (unsupported.length === 0) return;
+  throw new Error(`${AGNES_VIDEO_LAST_FRAME_UNSUPPORTED_MESSAGE} 当前请求包含不支持的内容：${unsupported.join('、')}。`);
+}
+
+async function generateVideoViaAgnes(
+  params: FreedomVideoParams,
+  model: string,
+  apiKey: string,
+  baseUrl: string,
+): Promise<GenerationResult> {
+  const grouped = groupVideoUploadFiles(params.uploadFiles);
+  assertFreedomAgnesVideoInputsSupported(grouped);
+  const primaryFile = grouped.single || grouped.first;
+  const body: Record<string, any> = {
+    model,
+    prompt: params.prompt,
+  };
+  if (primaryFile) body.image = await toUploadHttpUrl(primaryFile);
+  if (params.duration) body.duration = params.duration;
+  if (params.aspectRatio) body.aspect_ratio = params.aspectRatio;
+  if (params.resolution) body.resolution = params.resolution.toLowerCase();
+
+  const submitResp = await corsFetch(buildEndpoint(baseUrl, 'videos'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!submitResp.ok) {
+    throw toHttpError('Agnes video submit failed', submitResp.status, await submitResp.text());
+  }
+
+  const submitData = await submitResp.json();
+  const directUrl = extractVideoUrl(submitData);
+  const taskId = getAgnesVideoTaskId(submitData);
+  if (directUrl) return { url: directUrl, taskId };
+  if (!taskId) throw new Error('Agnes 视频接口返回空任务 ID');
+
+  const pollUrl = buildEndpoint(baseUrl, `videos/${taskId}`);
+  for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
+    await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
+    const pollResp = await corsFetch(pollUrl, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+    });
+    if (!pollResp.ok) continue;
+    const pollData = await pollResp.json();
+    const status = String(pollData.status || pollData.state || pollData.data?.status || '').toLowerCase();
+    if (status === 'completed' || status === 'succeeded' || status === 'success') {
+      const videoUrl =
+        normalizeVideoUrl(extractVideoUrl(pollData)) ||
+        normalizeVideoUrl(pollData.content?.video_url) ||
+        normalizeVideoUrl(pollData.output?.video_url) ||
+        normalizeVideoUrl(pollData.output?.url) ||
+        normalizeVideoUrl(pollData.data?.video_url) ||
+        normalizeVideoUrl(pollData.data?.url) ||
+        buildEndpoint(baseUrl, `videos/${taskId}/content`);
+      return { url: videoUrl, taskId };
+    }
+    if (status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled') {
+      throw new Error(pollData.error?.message || pollData.error || pollData.message || 'Agnes 视频生成失败');
+    }
+  }
+
+  throw new Error('Agnes 视频生成超时');
 }
 
 async function generateVideoViaUnified(
@@ -1976,6 +2184,7 @@ function extractVideoUrl(data: any): string | null {
   if (Array.isArray(data.output) && typeof data.output[0] === 'string') return data.output[0];
   if (data.outputs?.[0]) return data.outputs[0];
   if (data.video_url) return data.video_url;
+  if (typeof data.remixed_from_video_id === 'string' && data.remixed_from_video_id.startsWith('http')) return data.remixed_from_video_id;
   if (data.response?.url) return data.response.url;  // doubao, jimeng, grok, wan2.6
   return null;
 }

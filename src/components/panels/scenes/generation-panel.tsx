@@ -858,6 +858,7 @@ ${gridItemsZh}
     const apiKey = featureConfig.apiKey;
     const baseUrl = featureConfig.baseUrl?.replace(/\/+$/, '') || '';
     const model = featureConfig.models?.[0] || '';
+    const platform = featureConfig.platform;
     const keyManager = featureConfig.keyManager;
 
     if (!apiKey || !baseUrl || !model) {
@@ -915,6 +916,7 @@ ${gridItemsZh}
         prompt: finalPrompt,
         apiKey,
         baseUrl,
+        providerPlatform: platform,
         aspectRatio: contactSheetAspectRatio,
         resolution: '2K',
         keyManager,
@@ -1597,6 +1599,7 @@ ${gridItemsZh}
           prompt: finalPrompt,
           apiKey,
           baseUrl,
+          providerPlatform: featureConfig.platform,
           aspectRatio: snapshotAspectRatio,
           resolution: '2K',
           keyManager,

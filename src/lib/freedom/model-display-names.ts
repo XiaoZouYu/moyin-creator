@@ -7,6 +7,13 @@
  */
 
 export const MODEL_DISPLAY_NAMES: Record<string, string> = {
+  // ==================== Agnes AI ====================
+  'agnes-2.0-flash': 'Agnes 2.0 Flash',
+  'agnes-1.5-flash': 'Agnes 1.5 Flash',
+  'agnes-image-2.1-flash': 'Agnes Image 2.1 Flash',
+  'agnes-image-2.0-flash': 'Agnes Image 2.0 Flash',
+  'agnes-video-v2.0': 'Agnes Video v2.0',
+
   // ==================== 图像模型 ====================
 
   // --- Google / Gemini ---

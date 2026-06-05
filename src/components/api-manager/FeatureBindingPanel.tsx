@@ -35,8 +35,11 @@ import type { ReactNode } from "react";
 import { extractBrandFromModel, getBrandInfo } from "@/lib/brand-mapping";
 import { getBrandIcon } from "./brand-icons";
 import {
+  AGNES_PLATFORM,
   AUTO_VIP_PLATFORM,
   CHUNFENG_PLATFORM,
+  getAgnesModelCapabilities,
+  isAgnesProvider,
   isPricingMetadataProviderPlatform,
 } from "@/lib/ai/provider-platforms";
 import { getModelDisplayName } from "@/lib/freedom/model-display-names";
@@ -133,6 +136,7 @@ const DEFAULT_PLATFORM_CAPABILITIES: Record<string, ModelCapability[]> = {
   aggregator: ["text", "vision", "image_generation", "video_generation"],
   [AUTO_VIP_PLATFORM]: ["text", "vision", "image_generation", "video_generation"],
   [CHUNFENG_PLATFORM]: ["text", "vision", "image_generation"],
+  [AGNES_PLATFORM]: ["text", "image_generation", "video_generation"],
   // RunningHub is used for specialized tools; do not expose it as a default vision/chat provider.
   runninghub: ["image_generation"],
   [VOLC_ARK_VIDEO_PLATFORM]: ["video_generation"],
@@ -219,9 +223,8 @@ function modelSupportsCapability(
   modelTagsList?: string[] // ["对话","识图","工具"]
 ): boolean {
   if (!required) return true;
-
-  if (provider.capabilities?.includes(required)) {
-    return true;
+  if (isAgnesProvider(provider.platform)) {
+    return getAgnesModelCapabilities(modelName).includes(required);
   }
 
   // 1. 硬编码映射（精确控制少量预设模型）
@@ -253,11 +256,26 @@ function modelSupportsCapability(
   // 3. 模型名称模式推断（非 OpenAI 兼容中转 的其他供应商）
   const inferred = classifyModelByName(modelName);
   if (inferred.length > 0) {
+    const hasKnownProviderCaps = !!(
+      provider.capabilities?.length ||
+      DEFAULT_PLATFORM_CAPABILITIES[provider.platform]?.length
+    );
+    const isGenericTextFallback = inferred.length === 1 && inferred[0] === 'text';
+    if (isGenericTextFallback && hasKnownProviderCaps) {
+      return providerSupportsCapability(provider, required);
+    }
     return inferred.includes(required);
   }
 
   // 4. 平台级别 fallback
   return providerSupportsCapability(provider, required);
+}
+
+function getProviderModelCapabilities(modelName: string, provider: { platform: string }): ModelCapability[] {
+  if (isAgnesProvider(provider.platform)) {
+    return getAgnesModelCapabilities(modelName);
+  }
+  return classifyModelByName(modelName);
 }
 
 export function FeatureBindingPanel() {
@@ -306,7 +324,7 @@ export function FeatureBindingPanel() {
           const mType = modelTypes[model];
           const mTags = modelTags[model];
           if (!modelSupportsCapability(model, provider, feature.requiredCapability, mType, mTags)) continue;
-          const capabilities = classifyModelByName(model);
+          const capabilities = getProviderModelCapabilities(model, provider);
           if (modelSupportsCapability(model, provider, "vision", mType, mTags)) capabilities.push("vision");
           opts.push({
             providerId: provider.id,

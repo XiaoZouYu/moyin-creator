@@ -451,6 +451,7 @@ export async function generateStoryboardImage(
     prompt,
     apiKey,
     baseUrl,
+    providerPlatform: provider,
     aspectRatio,
     resolution,
     referenceImages: config.characterReferenceImages,

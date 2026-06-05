@@ -9,6 +9,11 @@ import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
 import { buildVolcVideoTaskUrls, isVolcArkVideoPlatform } from "@/lib/volc-ark-video";
+import {
+  AGNES_VIDEO_LAST_FRAME_UNSUPPORTED_MESSAGE,
+  isAgnesProvider,
+  isAgnesVideoModel,
+} from "@/lib/ai/provider-platforms";
 
 // ==================== Content Moderation ====================
 
@@ -234,7 +239,8 @@ function getUnifiedEndpointPaths(endpointTypes: string[]): { submit: string; pol
  * 根据模型的 supported_endpoint_types 元数据检测应使用的视频 API 格式
  * 优先使用 OpenAI 兼容中转 /api/pricing_new 同步的元数据，fallback 到模型名推断
  */
-function detectVideoApiFormat(model: string, platform?: string): 'openai_official' | 'unified' | 'volc' | 'volc_ark' | 'wan' | 'kling' | 'replicate' {
+function detectVideoApiFormat(model: string, platform?: string): 'openai_official' | 'unified' | 'agnes' | 'volc' | 'volc_ark' | 'wan' | 'kling' | 'replicate' {
+  if (isAgnesProvider(platform) && isAgnesVideoModel(model)) return 'agnes';
   if (isVolcArkVideoPlatform(platform)) return 'volc_ark';
 
   // 1. 查询 store 中的 endpoint types 元数据
@@ -458,6 +464,9 @@ export async function callVideoGenerationApi(
   if (!model) {
     throw new Error('请先在设置中配置视频生成模型');
   }
+  if (isAgnesProvider(resolvedPlatform) && !isAgnesVideoModel(model)) {
+    throw new Error('当前视频生成服务选择的是 Agnes AI，但所选模型不是 Agnes Video v2.0。请改用 agnes-video-v2.0，或选择其他支持视频生成的供应商。');
+  }
   const videoBaseUrl = featureConfig?.baseUrl?.replace(/\/+$/, '');
   if (!videoBaseUrl) {
     throw new Error('请先在设置中配置视频生成服务映射');
@@ -474,6 +483,15 @@ export async function callVideoGenerationApi(
   // 根据元数据/模型名检测 API 格式并路由，包裹重试（覆盖 429/503/529 等）
   const format = detectVideoApiFormat(model, resolvedPlatform);
   console.log('[VideoGen] Detected API format:', { model, format, platform: resolvedPlatform });
+  if (format === 'agnes') {
+    assertAgnesVideoInputsSupported({
+      imageWithRoles: processedImages,
+      videoRefs,
+      audioRefs,
+      enableAudio,
+      cameraFixed,
+    });
+  }
 
   return retryOperation(() => {
     if (signal?.aborted) return Promise.reject(new Error('用户已取消'));
@@ -484,6 +502,8 @@ export async function callVideoGenerationApi(
     switch (format) {
       case 'openai_official':
         return callOpenAIOfficialVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, duration, videoResolution, onProgress, keyManager, signal);
+      case 'agnes':
+        return callAgnesVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, onProgress, keyManager, signal);
       case 'volc':
         return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal, false, enableAudio);
       case 'volc_ark':
@@ -540,9 +560,169 @@ function extractVideoUrl(data: Record<string, any>): string | null {
     (Array.isArray(data.output) && typeof data.output[0] === 'string' ? data.output[0] : null) ||
     data.outputs?.[0] ||
     data.video_url ||
+    (typeof data.remixed_from_video_id === 'string' && data.remixed_from_video_id.startsWith('http') ? data.remixed_from_video_id : null) ||
     data.result_url ||
     data.response?.url;  // doubao, jimeng, grok, wan2.6
   return (url ? normalizeUrl(url) : undefined) ?? null;
+}
+
+function getAgnesVideoTaskId(data: Record<string, any>): string | undefined {
+  return (
+    data.task_id ||
+    data.id ||
+    data.video_id ||
+    data.data?.task_id ||
+    data.data?.id ||
+    data.response?.task_id ||
+    data.response?.id ||
+    data.result?.task_id ||
+    data.result?.id
+  )?.toString();
+}
+
+function getAgnesUnsupportedVideoInputs(params: {
+  imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }>;
+  videoRefs?: string[];
+  audioRefs?: string[];
+  enableAudio?: boolean;
+  cameraFixed?: boolean;
+}): string[] {
+  const unsupported: string[] = [];
+  if (params.imageWithRoles.some((img) => img.role === 'last_frame' && img.url)) {
+    unsupported.push('尾帧输入');
+  }
+  if ((params.videoRefs || []).filter(Boolean).length > 0) {
+    unsupported.push('视频引用');
+  }
+  if ((params.audioRefs || []).filter(Boolean).length > 0) {
+    unsupported.push('音频引用');
+  }
+  if (params.enableAudio === true) {
+    unsupported.push('自动生成/保留音频');
+  }
+  if (params.cameraFixed === true) {
+    unsupported.push('锁定运镜');
+  }
+  return unsupported;
+}
+
+function assertAgnesVideoInputsSupported(params: {
+  imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }>;
+  videoRefs?: string[];
+  audioRefs?: string[];
+  enableAudio?: boolean;
+  cameraFixed?: boolean;
+}): void {
+  const unsupported = getAgnesUnsupportedVideoInputs(params);
+  if (unsupported.length === 0) return;
+  throw new Error(`${AGNES_VIDEO_LAST_FRAME_UNSUPPORTED_MESSAGE} 当前请求包含不支持的内容：${unsupported.join('、')}。`);
+}
+
+async function callAgnesVideoApi(
+  apiKey: string,
+  prompt: string,
+  baseUrl: string,
+  model: string,
+  aspectRatio: string,
+  imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }>,
+  videoResolution?: string,
+  duration?: number,
+  onProgress?: (progress: number) => void,
+  keyManager?: { handleError: (status: number, errorText?: string) => boolean },
+  signal?: AbortSignal,
+): Promise<string> {
+  assertAgnesVideoInputsSupported({ imageWithRoles });
+  const firstFrame = imageWithRoles.find((img) => img.role === 'first_frame');
+  const requestBody: Record<string, unknown> = {
+    model,
+    prompt,
+  };
+  if (firstFrame?.url) requestBody.image = firstFrame.url;
+  if (duration) requestBody.duration = duration;
+  if (aspectRatio) requestBody.aspect_ratio = aspectRatio;
+  if (videoResolution) requestBody.resolution = videoResolution.toLowerCase();
+
+  const submitUrl = /\/v\d+$/.test(baseUrl) ? `${baseUrl}/videos` : `${baseUrl}/v1/videos`;
+  console.log('[VideoGen] Agnes format → POST /v1/videos', {
+    model,
+    hasImage: !!firstFrame?.url,
+    duration,
+    aspectRatio,
+    videoResolution,
+  });
+
+  const submitResponse = await corsFetch(submitUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(requestBody),
+    signal,
+  });
+
+  if (!submitResponse.ok) {
+    const errorText = await submitResponse.text();
+    console.error('[VideoGen] Agnes video submit error:', submitResponse.status, errorText);
+    handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+  }
+
+  const submitData = await submitResponse.json();
+  console.log('[VideoGen] Agnes submit response:', submitData);
+
+  const directUrl = extractVideoUrl(submitData);
+  if (directUrl) return directUrl;
+
+  const taskId = getAgnesVideoTaskId(submitData);
+  if (!taskId) throw new Error('Agnes 视频接口返回空任务 ID');
+
+  const pollUrl = /\/v\d+$/.test(baseUrl) ? `${baseUrl}/videos/${taskId}` : `${baseUrl}/v1/videos/${taskId}`;
+  const pollInterval = 5000;
+  const maxAttempts = 180;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
+    await sleepOrAbort(pollInterval, signal);
+
+    const statusResponse = await corsFetch(pollUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      signal,
+    });
+
+    if (!statusResponse.ok) {
+      if (statusResponse.status === 404) throw new Error('Agnes 视频任务不存在');
+      console.warn('[VideoGen] Agnes query failed:', statusResponse.status);
+      continue;
+    }
+
+    const statusData = await statusResponse.json();
+    console.log(`[VideoGen] Agnes task ${taskId} status:`, statusData);
+    const status = String(statusData.status || statusData.state || statusData.data?.status || '').toLowerCase();
+
+    if (status === 'completed' || status === 'succeeded' || status === 'success') {
+      const videoUrl =
+        extractVideoUrl(statusData) ||
+        normalizeUrl(statusData.content?.video_url) ||
+        normalizeUrl(statusData.output?.video_url) ||
+        normalizeUrl(statusData.output?.url) ||
+        normalizeUrl(statusData.data?.video_url) ||
+        normalizeUrl(statusData.data?.url) ||
+        normalizeUrl(/\/v\d+$/.test(baseUrl) ? `${baseUrl}/videos/${taskId}/content` : `${baseUrl}/v1/videos/${taskId}/content`);
+      if (!videoUrl) throw new Error('Agnes 视频任务完成但没有视频 URL');
+      return videoUrl;
+    }
+
+    if (status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled') {
+      throw new Error(statusData.error?.message || statusData.error || statusData.message || 'Agnes 视频生成失败');
+    }
+  }
+
+  throw new Error('Agnes 视频生成超时');
 }
 
 async function callUnifiedVideoApi(

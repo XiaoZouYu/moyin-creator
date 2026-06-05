@@ -17,6 +17,7 @@ export interface BrandInfo {
  * key: brandId, value: 显示名 + 主色
  */
 export const BRAND_REGISTRY: Record<string, BrandInfo> = {
+  agnes:        { displayName: 'Agnes AI',             color: '#2563EB' },
   openai:       { displayName: 'OpenAI',              color: '#10A37F' },
   anthropic:    { displayName: 'Anthropic',            color: '#D97757' },
   google:       { displayName: 'Google',               color: '#4285F4' },
@@ -51,6 +52,9 @@ export const BRAND_REGISTRY: Record<string, BrandInfo> = {
  * 顺序重要：更具体的模式应放在前面
  */
 const BRAND_PATTERNS: Array<{ pattern: RegExp; brand: string }> = [
+  // Agnes AI
+  { pattern: /^agnes-/i,                                                 brand: 'agnes' },
+
   // OpenAI 系列
   { pattern: /^images?[-_]?2(?:\.0)?$/i,                                brand: 'openai' },
   { pattern: /^(gpt-|o[1-9]|dall-e|dalle|chatgpt|sora|codex)/i,       brand: 'openai' },

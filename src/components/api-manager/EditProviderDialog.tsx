@@ -23,7 +23,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import type { IProvider } from "@/lib/api-key-manager";
 import { getApiKeyCount } from "@/lib/api-key-manager";
-import { isFixedBaseUrlProviderPlatform, normalizeBuiltInProvider } from "@/lib/ai/provider-platforms";
+import { isAgnesProvider, isFixedBaseUrlProviderPlatform, normalizeBuiltInProvider } from "@/lib/ai/provider-platforms";
 import { VOLC_ARK_VIDEO_BASE_URL, isVolcArkVideoPlatform } from "@/lib/volc-ark-video";
 
 interface EditProviderDialogProps {
@@ -58,8 +58,9 @@ export function EditProviderDialog({
   const handleSave = () => {
     if (!provider) return;
     const isOfficialVolcArk = isVolcArkVideoPlatform(provider.platform);
+    const isAgnes = isAgnesProvider(provider.platform);
 
-    if (!name.trim()) {
+    if (!isAgnes && !name.trim()) {
       toast.error("请输入名称");
       return;
     }
@@ -88,6 +89,8 @@ export function EditProviderDialog({
   const keyCount = getApiKeyCount(apiKey);
   const hasFixedBaseUrl = isVolcArkVideoPlatform(provider?.platform)
     || isFixedBaseUrlProviderPlatform(provider?.platform);
+  const hideName = isAgnesProvider(provider?.platform);
+  const hideModel = hideName;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -104,14 +107,16 @@ export function EditProviderDialog({
           </div>
 
           {/* Name */}
-          <div className="space-y-2">
-            <Label>名称</Label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="供应商名称"
-            />
-          </div>
+          {!hideName && (
+            <div className="space-y-2">
+              <Label>名称</Label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="供应商名称"
+              />
+            </div>
+          )}
 
           {/* Base URL */}
           {!hasFixedBaseUrl && (
@@ -145,17 +150,19 @@ export function EditProviderDialog({
           </div>
 
           {/* Model */}
-          <div className="space-y-2">
-            <Label>模型</Label>
-            <Input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder="输入模型名称，如 deepseek-v3"
-            />
-            <p className="text-xs text-muted-foreground">
-              多个模型用逗号分隔，第一个为默认模型
-            </p>
-          </div>
+          {!hideModel && (
+            <div className="space-y-2">
+              <Label>模型</Label>
+              <Input
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="输入模型名称，如 deepseek-v3"
+              />
+              <p className="text-xs text-muted-foreground">
+                多个模型用逗号分隔，第一个为默认模型
+              </p>
+            </div>
+          )}
         </div>
 
         <DialogFooter>

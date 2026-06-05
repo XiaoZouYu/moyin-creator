@@ -13,6 +13,8 @@ import { resolveImageApiFormat } from '@/lib/api-key-manager';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { corsFetch } from '@/lib/cors-fetch';
 import {
+  isAgnesImageModel,
+  isAgnesProvider,
   isAutoVipProvider,
   isImage2ModelName,
   resolveProviderImageApiFormat,
@@ -188,6 +190,38 @@ function normalizeBase64Image(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined;
   if (value.startsWith('data:image/')) return value;
   return `data:image/png;base64,${value}`;
+}
+
+function getAgnesImageInput(referenceImages?: string[]): string | string[] | undefined {
+  const images = (referenceImages || []).map((image) => image.trim()).filter(Boolean);
+  if (images.length === 0) return undefined;
+  return images.length === 1 ? images[0] : images;
+}
+
+function assertAgnesImageInputsSupported(params: {
+  referenceImages?: string[];
+  extraParams?: Record<string, any>;
+}): void {
+  const unsupported: string[] = [];
+  const referenceCount = (params.referenceImages || []).filter(Boolean).length;
+  if (referenceCount > 1) unsupported.push('多张参考图');
+
+  const extraParams = params.extraParams || {};
+  const allowedExtraParams = new Set(['size', 'n']);
+  for (const key of Object.keys(extraParams)) {
+    if (!allowedExtraParams.has(key)) unsupported.push(`高级参数 ${key}`);
+  }
+  if (extraParams.n != null && Number(extraParams.n) !== 1) {
+    unsupported.push('多图数量 n>1');
+  }
+
+  if (unsupported.length === 0) return;
+  throw new Error(`Agnes Image 目前只接入单张参考图、size 和 n=1；当前请求包含不支持的内容：${unsupported.join('、')}。请移除这些内容，或选择支持它们的图片模型。`);
+}
+
+function assertAgnesImageModelSelected(platform: string | undefined, model: string | undefined): void {
+  if (!isAgnesProvider(platform) || isAgnesImageModel(model)) return;
+  throw new Error('当前服务映射选择的是 Agnes AI，但所选模型不是 Agnes 图片模型。请改用 agnes-image-2.1-flash / agnes-image-2.0-flash，或选择其他支持图片生成的供应商。');
 }
 
 function normalizeInputImageReference(value: string): string {
@@ -1440,6 +1474,7 @@ async function submitImageTask(
   if (!baseUrl) {
     throw new Error('请先在设置中配置图片生成服务映射');
   }
+  assertAgnesImageModelSelected(providerPlatform, model);
   if (isImage2ModelName(model) && isAutoVipProvider(providerPlatform)) {
     const result = await submitViaResponsesImage(prompt, apiKey, baseUrl, aspectRatio, referenceImages, keyManager, undefined, undefined, model || IMAGE2_TOOL_MODEL);
     return { imageUrl: result.imageUrl };
@@ -1468,9 +1503,18 @@ async function submitImageTask(
     stream: false,
   };
 
+  const isAgnesImageRequest = isAgnesProvider(providerPlatform) && isAgnesImageModel(model);
+  if (isAgnesImageRequest) {
+    assertAgnesImageInputsSupported({ referenceImages });
+    delete requestData.stream;
+  }
   if (referenceImages && referenceImages.length > 0) {
     console.log('[ImageGenerator] Adding reference images:', referenceImages.length);
-    requestData.image_urls = referenceImages;
+    if (isAgnesImageRequest) {
+      requestData.image = getAgnesImageInput(referenceImages);
+    } else {
+      requestData.image_urls = referenceImages;
+    }
   }
 
   console.log('[ImageGenerator] Submitting image task:', {
@@ -1478,6 +1522,7 @@ async function submitImageTask(
     size: requestData.size,
     resolution: requestData.resolution,
     hasImageUrls: !!requestData.image_urls,
+    hasAgnesImage: !!requestData.image,
   });
 
   try {
@@ -1716,6 +1761,7 @@ export async function submitGridImageRequest(params: {
     throw new Error('图片生成模型未配置：请在设置的服务映射中选择具体模型');
   }
   const normalizedBase = baseUrl.replace(/\/+$/, '');
+  assertAgnesImageModelSelected(params.providerPlatform, normalizedModel);
 
   // 检测 API 格式（与 generateImage 一致）
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[normalizedModel];
@@ -1767,17 +1813,26 @@ export async function submitGridImageRequest(params: {
     n: 1,
   };
 
-  if (usesOpenAIImageSize(normalizedModel)) {
+  const isAgnesImageRequest = isAgnesProvider(params.providerPlatform) && isAgnesImageModel(normalizedModel);
+
+  if (usesOpenAIImageSize(normalizedModel) || isAgnesImageRequest) {
     requestBody.size = getImageSizeValue(normalizedModel, aspectRatio);
   } else {
     requestBody.aspect_ratio = aspectRatio;
   }
 
-  if (resolution && !usesOpenAIImageSize(normalizedModel)) {
+  if (resolution && !usesOpenAIImageSize(normalizedModel) && !isAgnesImageRequest) {
     requestBody.resolution = resolution;
   }
+  if (isAgnesImageRequest) {
+    assertAgnesImageInputsSupported({ referenceImages, extraParams });
+  }
   if (referenceImages && referenceImages.length > 0) {
-    requestBody.image_urls = referenceImages;
+    if (isAgnesImageRequest) {
+      requestBody.image = getAgnesImageInput(referenceImages);
+    } else {
+      requestBody.image_urls = referenceImages;
+    }
   }
   if (extraParams) {
     Object.assign(requestBody, extraParams);

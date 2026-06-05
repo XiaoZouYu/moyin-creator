@@ -1132,6 +1132,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         prompt: gridPrompt,
         apiKey,
         baseUrl: imageBaseUrl,
+        providerPlatform: platform,
         aspectRatio: aspect,
         resolution: storyboardConfig.resolution || '2K',
         referenceImages: apiReferenceImages.length > 0
@@ -2052,6 +2053,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         prompt: enhancedPrompt,
         apiKey,
         baseUrl: imageBaseUrl,
+        providerPlatform: platform,
         aspectRatio: storyboardConfig.aspectRatio || '9:16',
         resolution: storyboardConfig.resolution || '2K',
         referenceImages: apiReferenceImages.length > 0
@@ -2691,6 +2693,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         prompt: gridPrompt,
         apiKey,
         baseUrl: imageBaseUrl,
+        providerPlatform: platform,
         aspectRatio: gridAspect,
         resolution: storyboardConfig.resolution || '2K',
         referenceImages: apiReferenceImages.length > 0
@@ -2976,6 +2979,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       prompt,
       apiKey: apiKeyToUse,
       baseUrl: imageBaseUrl,
+      providerPlatform: platform,
       aspectRatio: aspect,
       resolution: storyboardConfig.resolution || '2K',
       referenceImages: refUrls && refUrls.length > 0 ? refUrls.slice(0, 14) : undefined,
@@ -2994,6 +2998,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           prompt,
           apiKey: apiKeyToUse,
           baseUrl: imageBaseUrl,
+          providerPlatform: platform,
           aspectRatio: aspect,
           keyManager: mergedKeyManager,
         });
@@ -3172,6 +3177,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         prompt: enhancedPrompt,
         apiKey,
         baseUrl: imageBaseUrl,
+        providerPlatform: platform,
         aspectRatio: storyboardConfig.aspectRatio || '9:16',
         resolution: storyboardConfig.resolution || '2K',
         referenceImages: apiReferenceImages.length > 0

@@ -30,6 +30,10 @@ import {
 import { toast } from "sonner";
 import type { IProvider, ModelCapability } from "@/lib/api-key-manager";
 import {
+  AGNES_BASE_URL,
+  AGNES_DEFAULT_MODELS,
+  AGNES_NAME,
+  AGNES_PLATFORM,
   AUTO_VIP_BASE_URL,
   AUTO_VIP_NAME,
   AUTO_VIP_PLATFORM,
@@ -76,6 +80,19 @@ const PLATFORM_PRESETS: Array<{
     recommended: true,
     allowMultiple: true,
     hideBaseUrl: true,
+    hideModel: true,
+  },
+  {
+    platform: AGNES_PLATFORM,
+    name: AGNES_NAME,
+    baseUrl: AGNES_BASE_URL,
+    description: "Agnes AI 官方兼容接口，支持对话、图片生成和视频生成，只需填写 API Key",
+    services: ["对话", "图片生成", "视频生成"],
+    models: [...AGNES_DEFAULT_MODELS],
+    capabilities: ["text", "image_generation", "video_generation"],
+    allowMultiple: true,
+    hideBaseUrl: true,
+    hideName: true,
     hideModel: true,
   },
   {
@@ -196,7 +213,7 @@ export function AddProviderDialog({
       .split(/[,\n]/)
       .map((item) => item.trim())
       .filter(Boolean);
-    const modelArray = typedModels.length > 0 ? typedModels : presetModels;
+    const modelArray = hideModel ? presetModels : (typedModels.length > 0 ? typedModels : presetModels);
     
     onSubmit({
       platform,
