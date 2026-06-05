@@ -6,8 +6,7 @@
  *
  * 自动检测运行环境：
  * - Electron 桌面模式 → 直接使用原生 fetch()（无 CORS 限制）
- * - 浏览器开发模式   → 通过 Vite 开发服务器 /__api_proxy?url=... 代理转发
- * - 浏览器生产模式   → 直接 fetch()（需后端/Nginx 提供反向代理）
+ * - 浏览器模式       → 对跨域 URL 通过 /__api_proxy 或 VITE_WEB_API_PROXY_URL 代理转发
  */
 
 /** 检测是否在 Electron 环境中运行 */
@@ -21,11 +20,6 @@ function isElectron(): boolean {
       navigator.userAgent.includes('Electron')
     )
   );
-}
-
-/** 检测是否在 Vite 开发服务器中运行 */
-function isViteDev(): boolean {
-  return import.meta.env?.DEV === true;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -107,11 +101,36 @@ function removeContentType(headers: Record<string, string>): Record<string, stri
   return result;
 }
 
+function isHttpUrl(value: string): boolean {
+  return value.startsWith('http://') || value.startsWith('https://');
+}
+
+function shouldProxyUrl(targetUrl: string): boolean {
+  if (!isHttpUrl(targetUrl)) return false;
+  if (typeof window === 'undefined') return false;
+  if (import.meta.env?.VITE_WEB_API_PROXY_URL) return true;
+  try {
+    return new URL(targetUrl).origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+function buildProxyUrl(targetUrl: string): string {
+  const configuredProxy = import.meta.env?.VITE_WEB_API_PROXY_URL;
+  if (configuredProxy && typeof window !== 'undefined') {
+    const proxyUrl = new URL(configuredProxy, window.location.origin);
+    proxyUrl.searchParams.set('url', targetUrl);
+    return proxyUrl.toString();
+  }
+  return `/__api_proxy?url=${encodeURIComponent(targetUrl)}`;
+}
+
 /**
  * CORS 安全的 fetch 封装
  *
- * 在浏览器开发模式下，自动将请求代理到 Vite 开发服务器的
- * `/__api_proxy` 中间件，由服务端转发请求以绕过 CORS 限制。
+ * 在浏览器模式下，自动将跨域 HTTP(S) 请求代理到 `/__api_proxy`
+ * 或 VITE_WEB_API_PROXY_URL，由服务端转发请求以绕过 CORS 限制。
  *
  * @param url    目标 URL（与原生 fetch 参数相同）
  * @param init   请求选项（与原生 fetch 参数相同）
@@ -149,13 +168,13 @@ export async function corsFetch(
     });
   }
 
-  // Electron 或非开发环境：直连
-  if (isElectron() || !isViteDev()) {
+  // Electron 或同源/非 HTTP 请求：直连
+  if (isElectron() || !shouldProxyUrl(targetUrl)) {
     return fetch(targetUrl, init);
   }
 
-  // 浏览器开发模式：走 Vite 代理
-  const proxyUrl = `/__api_proxy?url=${encodeURIComponent(targetUrl)}`;
+  // 浏览器模式：跨域请求统一走代理，避免外部图片/图床/API CORS 失败
+  const proxyUrl = buildProxyUrl(targetUrl);
 
   // 将原始 headers 序列化到 x-proxy-headers 头中
   // 这样代理中间件可以把它们转发给目标服务器
@@ -183,5 +202,14 @@ export async function corsFetch(
     body: proxyBody,
   };
 
-  return fetch(proxyUrl, proxyInit);
+  const response = await fetch(proxyUrl, proxyInit);
+  const configuredProxy = import.meta.env?.VITE_WEB_API_PROXY_URL;
+  const contentType = response.headers.get('content-type') || '';
+  if (!configuredProxy && response.status === 404 && contentType.includes('text/html')) {
+    throw new Error('跨域代理 /__api_proxy 不可用，请检查线上反向代理配置');
+  }
+  if (!configuredProxy && response.ok && contentType.includes('text/html')) {
+    throw new Error('跨域代理 /__api_proxy 返回 HTML，请检查线上反向代理配置');
+  }
+  return response;
 }

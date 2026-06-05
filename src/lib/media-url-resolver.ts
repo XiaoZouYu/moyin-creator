@@ -74,7 +74,22 @@ export interface ResolveImageToHttpUrlOptions {
   frameLabel?: string;
   minDimension?: number;
   preferLocalFallback?: boolean;
+  forceReuploadHttp?: boolean;
   logPrefix?: string;
+}
+
+async function uploadDataUrlToImageHost(dataUrl: string, options: ResolveImageToHttpUrlOptions): Promise<string> {
+  const preparedDataUrl = await ensureDataUrlMinDimension(dataUrl, options.minDimension);
+  const result = await uploadToImageHost(preparedDataUrl, {
+    name: options.uploadName?.trim() || `media_ref_${Date.now()}`,
+    expiration: 15552000,
+  });
+
+  if (!result.success || !result.url) {
+    throw new Error(result.error || '图片上传失败');
+  }
+
+  return result.url;
 }
 
 export async function resolveImageToHttpUrl(
@@ -87,20 +102,35 @@ export async function resolveImageToHttpUrl(
   const logPrefix = options.logPrefix || 'MediaUrlResolver';
 
   if (!url) {
-    if (isHttpMediaUrl(localFallback)) return localFallback;
+    if (localFallback) {
+      if (!options.forceReuploadHttp && isHttpMediaUrl(localFallback)) return localFallback;
+      return resolveImageToHttpUrl(localFallback, {
+        ...options,
+        localFallback: null,
+        preferLocalFallback: false,
+      });
+    }
     console.warn(`[${logPrefix}] ${label}: empty image source`);
     return '';
   }
 
   if (isHttpMediaUrl(url)) {
     const canRefreshFromLocal = isLocalMediaSource(localFallback) && isImageHostConfigured();
-    if (canRefreshFromLocal && (options.preferLocalFallback !== false || isDiscouragedExternalImageUrl(url))) {
+    if (canRefreshFromLocal && (options.forceReuploadHttp || options.preferLocalFallback !== false || isDiscouragedExternalImageUrl(url))) {
       console.log(`[${logPrefix}] ${label}: re-uploading local fallback instead of reusing external URL`);
       return resolveImageToHttpUrl(localFallback, {
         ...options,
         localFallback: null,
         preferLocalFallback: false,
       });
+    }
+
+    if (options.forceReuploadHttp) {
+      if (!isImageHostConfigured()) {
+        throw new Error(`${label}需要重新上传外部 HTTP 图片，但图床未配置，请先在设置中启用 Catbox 或其他可用图床`);
+      }
+      console.log(`[${logPrefix}] ${label}: re-uploading external HTTP image before API submission`);
+      return uploadDataUrlToImageHost(await mediaUrlToDataUrl(url), options);
     }
 
     if (isDiscouragedExternalImageUrl(url)) {
@@ -113,17 +143,7 @@ export async function resolveImageToHttpUrl(
     throw new Error('图床未配置，请先在设置中启用 Catbox 或其他可用图床');
   }
 
-  const dataUrl = await ensureDataUrlMinDimension(await mediaUrlToDataUrl(url), options.minDimension);
-  const result = await uploadToImageHost(dataUrl, {
-    name: options.uploadName?.trim() || `media_ref_${Date.now()}`,
-    expiration: 15552000,
-  });
-
-  if (!result.success || !result.url) {
-    throw new Error(result.error || '图片上传失败');
-  }
-
-  return result.url;
+  return uploadDataUrlToImageHost(await mediaUrlToDataUrl(url), options);
 }
 
 export interface PrepareImageReferencesForApiOptions {

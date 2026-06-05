@@ -90,6 +90,7 @@ export function getVideoApiConfig() {
 interface ConvertToHttpUrlOptions {
   fallbackHttpUrl?: string | null;
   uploadName?: string;
+  forceReuploadHttp?: boolean;
 }
 
 // Convert local/base64 image to HTTP URL for API
@@ -101,6 +102,7 @@ export async function convertToHttpUrl(
     localFallback: options?.fallbackHttpUrl,
     uploadName: options?.uploadName?.trim() || `media_ref_${Date.now()}`,
     minDimension: 300,
+    forceReuploadHttp: options?.forceReuploadHttp ?? true,
     logPrefix: 'VideoGen',
   });
 }

@@ -26,7 +26,6 @@ import {
 } from '@/lib/ai/provider-platforms';
 import { corsFetch } from '@/lib/cors-fetch';
 import { mediaUrlToBlob, mediaUrlToDataUrl, resolveImageToHttpUrl } from '@/lib/media-url-resolver';
-import { uploadBase64Image } from '@/lib/utils/image-upload';
 import { isVeoModel, resolveVeoUploadCapability } from '@/lib/freedom/veo-capability';
 import { type AIFeature, useAPIConfigStore } from '@/stores/api-config-store';
 import { useMediaStore } from '@/stores/media-store';
@@ -300,14 +299,17 @@ async function resolveFreedomImageReferences(
       inputUrl = await mediaUrlToDataUrl(ref.url);
     }
 
-    if (options.preferHttpUrl && !/^https?:\/\//i.test(inputUrl)) {
+    if (options.preferHttpUrl) {
       try {
         inputUrl = await resolveImageToHttpUrl(inputUrl, {
           uploadName: ref.name,
+          frameLabel: `Freedom image reference${ref.name ? ` ${ref.name}` : ''}`,
+          forceReuploadHttp: /^https?:\/\//i.test(inputUrl),
           logPrefix: 'Freedom',
         });
       } catch (error) {
-        console.warn('[Freedom] Failed to upload reference image, falling back to original input:', error);
+        console.error('[Freedom] Failed to prepare reference image HTTP URL:', error);
+        throw new Error(`参考图转换为 HTTP URL 失败：${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -1418,9 +1420,14 @@ function validateVeoVideoUploads(
 }
 
 async function toUploadHttpUrl(file: FreedomVideoUploadFile): Promise<string> {
-  if (/^https?:\/\//i.test(file.dataUrl)) return file.dataUrl;
   try {
-    return await uploadBase64Image(file.dataUrl);
+    return await resolveImageToHttpUrl(file.dataUrl, {
+      uploadName: file.fileName || `freedom_${file.role}_${Date.now()}`,
+      frameLabel: `Freedom video ${file.role} image`,
+      minDimension: 300,
+      forceReuploadHttp: true,
+      logPrefix: 'Freedom',
+    });
   } catch (error) {
     console.error('[Freedom] Video reference image upload failed', {
       role: file.role,
