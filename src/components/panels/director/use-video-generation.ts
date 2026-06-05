@@ -828,8 +828,9 @@ async function callVolcVideoApi(
     return textContent;
   };
 
-  const toVolcImageDataUrl = async (img: { url: string; sourceUrl?: string }): Promise<string> => {
-    const sources = [img.sourceUrl, img.url].filter((source): source is string => !!source);
+  const toVolcImageDataUrl = async (img: { url: string; role?: string; sourceUrl?: string }): Promise<string> => {
+    const sources = [img.url, img.sourceUrl].filter((source): source is string => !!source);
+    const label = img.role === 'last_frame' ? '尾帧图' : '首帧图';
     let lastError: unknown = null;
     for (const source of [...new Set(sources)]) {
       try {
@@ -842,7 +843,8 @@ async function callVolcVideoApi(
         });
       }
     }
-    throw lastError instanceof Error ? lastError : new Error('Volc 图片输入转换失败');
+    const message = lastError instanceof Error ? lastError.message : String(lastError || '未知错误');
+    throw new Error(`${label}读取失败：${message}`);
   };
 
   // 图片内容（首帧/尾帧）
