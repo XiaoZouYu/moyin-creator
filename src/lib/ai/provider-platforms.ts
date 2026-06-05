@@ -190,9 +190,10 @@ export function resolveProviderImageApiFormat(params: {
     return 'openai_images';
   }
 
-  // auto-vip 继续使用项目原有 IMAGE2 Responses tool 流程。
+  // auto-vip currently exposes gpt-image-2 through the standard Images API.
+  // The Responses image tool path returns upstream 502s in production.
   if (isAutoVipProvider(platform) && isImage2ModelName(model)) {
-    return 'openai_responses_image';
+    return 'openai_images';
   }
 
   if (isAgnesProvider(platform)) {

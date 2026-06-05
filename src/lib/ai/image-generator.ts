@@ -817,7 +817,8 @@ async function generateImage(
     promptPreview: params.prompt.substring(0, 100) + '...',
   });
 
-  // auto-vip 的 IMAGE2 继续走 Responses API + image_generation tool。
+  // Responses image tool models use /v1/responses; provider profiles may route
+  // the same model name to the standard Images API when their proxy requires it.
   if (apiFormat === 'openai_responses_image') {
     return submitViaResponsesImage(
       params.prompt,

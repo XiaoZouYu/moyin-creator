@@ -155,6 +155,19 @@ function ossObjectKey(key) {
   return `${prefix}${normalizeStorageKey(key)}`
 }
 
+function publicOssUrl(objectKey) {
+  const publicBase = process.env.ALI_OSS_PUBLIC_BASE_URL || process.env.OSS_PUBLIC_BASE_URL
+  if (publicBase) {
+    return `${publicBase.replace(/\/+$/, '')}/${objectKey.split('/').map(encodeURIComponent).join('/')}`
+  }
+  const publicRead = (process.env.ALI_OSS_PUBLIC_READ || process.env.OSS_PUBLIC_READ || '').toLowerCase() === 'true'
+  if (!publicRead) return null
+  const bucket = process.env.ALI_OSS_BUCKET || process.env.OSS_BUCKET
+  const region = process.env.ALI_OSS_REGION || process.env.OSS_REGION || 'oss-cn-chengdu'
+  if (!bucket || !region) return null
+  return `https://${bucket}.${region}.aliyuncs.com/${objectKey.split('/').map(encodeURIComponent).join('/')}`
+}
+
 function contentTypeFromObject(result, fallback = 'application/octet-stream') {
   return result?.res?.headers?.['content-type'] || result?.res?.headers?.['Content-Type'] || fallback
 }
@@ -295,6 +308,8 @@ export async function handleCloudMediaRequest(req, res) {
         oss: !!getOssClient(),
         bucket: process.env.ALI_OSS_BUCKET || process.env.OSS_BUCKET || '',
         prefix: process.env.ALI_OSS_PREFIX || process.env.OSS_PREFIX || DEFAULT_OSS_PREFIX,
+        publicBaseUrl: process.env.ALI_OSS_PUBLIC_BASE_URL || process.env.OSS_PUBLIC_BASE_URL || '',
+        publicRead: (process.env.ALI_OSS_PUBLIC_READ || process.env.OSS_PUBLIC_READ || '').toLowerCase() === 'true',
       })
       return
     }
@@ -305,25 +320,39 @@ export async function handleCloudMediaRequest(req, res) {
     if (action === 'item' && (req.method === 'POST' || req.method === 'PUT')) {
       const body = await readJsonBody(req)
       const key = normalizeStorageKey(body.key)
+      const objectKey = ossObjectKey(key)
       const mimeType = String(body.mimeType || 'application/octet-stream')
       const dataBase64 = String(body.dataBase64 || '')
       if (!dataBase64) throw new Error('Missing dataBase64')
       const payload = Buffer.from(dataBase64.includes(',') ? dataBase64.slice(dataBase64.indexOf(',') + 1) : dataBase64, 'base64')
-      await client.put(ossObjectKey(key), payload, {
+      await client.put(objectKey, payload, {
         mime: mimeType,
         headers: {
           'Content-Type': mimeType,
           'Cache-Control': 'public, max-age=31536000',
         },
       })
-      sendJson(res, 200, { success: true })
+      const publicUrl = publicOssUrl(objectKey)
+      const expires = Number(process.env.ALI_OSS_SIGNED_URL_EXPIRES || process.env.OSS_SIGNED_URL_EXPIRES || 24 * 60 * 60)
+      sendJson(res, 200, {
+        success: true,
+        key,
+        objectKey,
+        url: publicUrl || client.signatureUrl(objectKey, { expires, method: 'GET' }),
+      })
       return
     }
 
     if (action === 'url' && req.method === 'GET') {
       const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+      const objectKey = ossObjectKey(key)
+      const publicUrl = publicOssUrl(objectKey)
+      if (publicUrl) {
+        sendJson(res, 200, { url: publicUrl })
+        return
+      }
       const expires = Number(process.env.ALI_OSS_SIGNED_URL_EXPIRES || process.env.OSS_SIGNED_URL_EXPIRES || 24 * 60 * 60)
-      const url = client.signatureUrl(ossObjectKey(key), { expires, method: 'GET' })
+      const url = client.signatureUrl(objectKey, { expires, method: 'GET' })
       sendJson(res, 200, { url })
       return
     }

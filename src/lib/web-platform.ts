@@ -398,8 +398,8 @@ async function cloudStorageRemoveDir(prefix: string): Promise<boolean> {
   return !!data.success
 }
 
-async function cloudMediaSave(key: string, blob: Blob): Promise<boolean> {
-  const data = await fetchCloudJson<{ success: boolean }>('/__cloud_media/item', {
+async function cloudMediaSave(key: string, blob: Blob): Promise<{ success: boolean; url?: string }> {
+  const data = await fetchCloudJson<{ success: boolean; url?: string }>('/__cloud_media/item', {
     method: 'PUT',
     body: JSON.stringify({
       key,
@@ -407,7 +407,7 @@ async function cloudMediaSave(key: string, blob: Blob): Promise<boolean> {
       dataBase64: arrayBufferToBase64(await blob.arrayBuffer()),
     }),
   }, { media: true })
-  return !!data.success
+  return { success: !!data.success, url: data.url }
 }
 
 async function cloudMediaUrl(key: string): Promise<string | null> {
@@ -732,21 +732,15 @@ function installImageStorage() {
         const blob = await sourceToBlob(url)
         const safeName = ensureExtension(safeFilename(filename), blob.type || 'application/octet-stream')
         const key = `${category}/${safeName}`
-        await setMedia({
-          key,
-          category,
-          filename: safeName,
-          blob,
-          mimeType: blob.type || 'application/octet-stream',
-          size: blob.size,
-          createdAt: Date.now(),
-        })
-        try {
-          await cloudMediaSave(key, blob)
-        } catch (error) {
-          console.warn('[web-platform] Cloud media save failed, using local cache only:', error)
+        const saved = await cloudMediaSave(key, blob)
+        if (!saved.success) {
+          throw new Error('OSS media upload failed')
         }
-        return { success: true, localPath: `local-image://${category}/${encodeURIComponent(safeName)}` }
+        const cloudUrl = saved.url || await cloudMediaUrl(key)
+        if (!cloudUrl) {
+          throw new Error('OSS media upload succeeded but no URL was returned')
+        }
+        return { success: true, localPath: cloudUrl }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }
       }
