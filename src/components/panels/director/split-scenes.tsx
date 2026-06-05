@@ -1624,7 +1624,8 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         frameLabel: 'First frame',
         uploadName: `scene_${sceneId}_first_${Date.now()}`,
         minDimension: 300,
-        forceReuploadHttp: true,
+        forceReuploadHttp: false,
+        preferLocalFallback: false,
         logPrefix: 'SplitScenes',
       });
       if (!firstFrameConverted) {
@@ -1645,7 +1646,8 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           frameLabel: 'Last frame',
           uploadName: `scene_${sceneId}_last_${Date.now()}`,
           minDimension: 300,
-          forceReuploadHttp: true,
+          forceReuploadHttp: false,
+          preferLocalFallback: false,
           logPrefix: 'SplitScenes',
         });
         if (lastFrameConverted) {

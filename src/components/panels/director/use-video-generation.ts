@@ -95,6 +95,7 @@ interface ConvertToHttpUrlOptions {
   fallbackHttpUrl?: string | null;
   uploadName?: string;
   forceReuploadHttp?: boolean;
+  preferLocalFallback?: boolean;
 }
 
 type VideoImageRole = 'first_frame' | 'last_frame';
@@ -114,7 +115,8 @@ export async function convertToHttpUrl(
     localFallback: options?.fallbackHttpUrl,
     uploadName: options?.uploadName?.trim() || `media_ref_${Date.now()}`,
     minDimension: 300,
-    forceReuploadHttp: options?.forceReuploadHttp ?? true,
+    forceReuploadHttp: options?.forceReuploadHttp ?? false,
+    preferLocalFallback: options?.preferLocalFallback ?? false,
     logPrefix: 'VideoGen',
   });
 }
