@@ -3,12 +3,19 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { getFeatureConfig } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
-import { readImageAsBase64, saveVideoToLocal } from "@/lib/image-storage";
-import { blobToDataUrl, isHttpMediaUrl, mediaUrlToDataUrl, normalizeImageDataUrlForApi, resolveImageToHttpUrl } from "@/lib/media-url-resolver";
+import { saveVideoToLocal } from "@/lib/image-storage";
+import { resolveImageToHttpUrl } from "@/lib/media-url-resolver";
 import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
 import { buildVolcVideoTaskUrls, isVolcArkVideoPlatform } from "@/lib/volc-ark-video";
+import { createProviderError, isProviderContentModerationError } from "@/lib/ai/provider-errors";
+import {
+  prepareVideoMediaInputs,
+  type PreparedVideoImageInput,
+  type VideoApiFormat,
+  type VideoImageInput,
+} from "@/lib/ai/video-media-prep";
 import {
   ensureStructuredCaptionVideoPrompt,
   shouldRetryWithStructuredCaptionPrompt,
@@ -27,7 +34,6 @@ import {
  */
 const CONTENT_MODERATION_KEYWORDS = [
   'moderation',
-  'authentication',
   'content_sensitive',
   'violation',
   'sensitive',
@@ -54,11 +60,12 @@ const CONTENT_MODERATION_KEYWORDS = [
  * @returns true if it's a moderation error
  */
 export function isContentModerationError(error: string | Error | unknown): boolean {
+  if (isProviderContentModerationError(error)) return true;
   const errorStr = error instanceof Error
     ? error.message.toLowerCase()
     : String(error).toLowerCase();
 
-  return CONTENT_MODERATION_KEYWORDS.some(keyword => 
+  return CONTENT_MODERATION_KEYWORDS.some(keyword =>
     errorStr.includes(keyword.toLowerCase())
   );
 }
@@ -98,13 +105,8 @@ interface ConvertToHttpUrlOptions {
   preferLocalFallback?: boolean;
 }
 
-type VideoImageRole = 'first_frame' | 'last_frame';
-
-export interface VideoImageWithRole {
-  url: string;
-  role: VideoImageRole;
-  sourceUrl?: string;
-}
+export type VideoImageRole = VideoImageInput['role'];
+export type VideoImageWithRole = VideoImageInput;
 
 // Convert local/base64 image to HTTP URL for API
 export async function convertToHttpUrl(
@@ -153,7 +155,7 @@ export async function buildImageWithRoles(
  * OpenAI 兼容中转 supported_endpoint_types → 内部视频路由格式
  * 基于 /api/pricing_new 返回的元数据，而非模型名猜测
  */
-const VIDEO_FORMAT_MAP: Record<string, 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate'> = {
+const VIDEO_FORMAT_MAP: Record<string, VideoApiFormat> = {
   // OpenAI 官方视频格式 (sora-2): /v1/videos
   'openAI官方视频格式': 'openai_official',
   'openAI视频格式': 'openai_official',
@@ -227,7 +229,7 @@ function getUnifiedEndpointPaths(endpointTypes: string[]): { submit: string; pol
  * 根据模型的 supported_endpoint_types 元数据检测应使用的视频 API 格式
  * 优先使用 OpenAI 兼容中转 /api/pricing_new 同步的元数据，fallback 到模型名推断
  */
-function detectVideoApiFormat(model: string, platform?: string): 'openai_official' | 'unified' | 'agnes' | 'volc' | 'volc_ark' | 'wan' | 'kling' | 'replicate' {
+function detectVideoApiFormat(model: string, platform?: string): VideoApiFormat {
   if (isAgnesProvider(platform) && isAgnesVideoModel(model)) return 'agnes';
   if (isVolcArkVideoPlatform(platform)) return 'volc_ark';
 
@@ -290,40 +292,22 @@ function handleVideoSubmitError(
   status: number,
   errorText: string,
   keyManager?: { handleError: (status: number, errorText?: string) => boolean; getCurrentKey?: () => string | null },
+  context?: { provider?: string; model?: string; route?: string },
 ): never {
   if (keyManager?.handleError(status, errorText)) {
     const nextKey = keyManager.getCurrentKey?.();
     const keyHint = nextKey ? `${nextKey.substring(0, 8)}…` : '(none)';
     console.log(`[VideoGen] Rotated to next key: ${keyHint} (due to ${status})`);
   }
-  let errorMessage = `视频 API 错误: ${status}`;
-  let errorCode = '';
-  try {
-    const errorJson = JSON.parse(errorText);
-    errorCode = errorJson.error?.code || errorJson.code || '';
-    errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
-  } catch { /* ignore */ }
-  const normalizedError = `${errorCode} ${errorMessage}`.toLowerCase();
-  if (errorCode === 'AccountOverdueError' || normalizedError.includes('overdue balance')) {
-    const err = new Error(`火山方舟账号欠费或余额不足（${status}${errorCode ? ` ${errorCode}` : ''}），请到火山方舟控制台充值或结清欠款后重试。`) as Error & { status?: number };
-    err.status = status;
-    throw err;
-  }
-  if (status === 401 || status === 403) throw new Error('API Key 无效或已过期');
-  if (status === 429) {
-    const err = new Error('API 请求过于频繁，请稍后重试') as Error & { status?: number };
-    err.status = 429;
-    throw err;
-  }
-  // 所有 500/502/503/529 均视为可重试的临时服务错误，携带 status 供重试机制识别
-  if (status >= 500) {
-    const err = new Error(errorMessage || `上游服务暂时不可用 (${status})`) as Error & { status?: number };
-    err.status = status;
-    throw err;
-  }
-  const err = new Error(errorMessage) as Error & { status?: number };
-  err.status = status;
-  throw err;
+  throw createProviderError({
+    mediaKind: 'video',
+    stage: 'submit',
+    status,
+    errorText,
+    provider: context?.provider,
+    model: context?.model,
+    route: context?.route,
+  });
 }
 
 // ==================== 视频生成主入口 ====================
@@ -376,22 +360,30 @@ export async function callVideoGenerationApi(
     throw new Error('请先在设置中配置视频生成服务映射');
   }
 
-  // 上游调用点已通过 media-url-resolver 统一转换图片 URL，这里不再二次 fetch 外链。
-  const processedImages = await Promise.all(
-    imageWithRoles.map(async (img) => ({
-      ...img,
-      url: img.url,
-    }))
-  );
-
   // 根据元数据/模型名检测 API 格式并路由，包裹重试（覆盖 429/503/529 等）
   const format = detectVideoApiFormat(model, resolvedPlatform);
   console.log('[VideoGen] Detected API format:', { model, format, platform: resolvedPlatform });
+  const preparedMedia = await retryOperation(() => prepareVideoMediaInputs({
+    format,
+    imageWithRoles,
+    videoRefs,
+    audioRefs,
+    provider: resolvedPlatform,
+    model,
+    logPrefix: 'VideoGen',
+  }), {
+    maxRetries: 2,
+    baseDelay: 1000,
+    retryOn429: true,
+    onRetry: (attempt, delay, error) => {
+      console.warn(`[VideoGen] Media input preparation retry ${attempt}, delay ${delay}ms, error: ${error.message}`);
+    },
+  });
   if (format === 'agnes') {
     assertAgnesVideoInputsSupported({
-      imageWithRoles: processedImages,
-      videoRefs,
-      audioRefs,
+      imageWithRoles: preparedMedia.images,
+      videoRefs: preparedMedia.videoRefs,
+      audioRefs: preparedMedia.audioRefs,
       enableAudio,
       cameraFixed,
     });
@@ -407,20 +399,20 @@ export async function callVideoGenerationApi(
       case 'openai_official':
         return callOpenAIOfficialVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, duration, videoResolution, onProgress, keyManager, signal);
       case 'agnes':
-        return callAgnesVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, onProgress, keyManager, signal);
+        return callAgnesVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, preparedMedia.images, videoResolution, duration, onProgress, keyManager, signal);
       case 'volc':
-        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal, false, enableAudio);
+        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, preparedMedia.images, videoResolution, duration, cameraFixed, onProgress, keyManager, preparedMedia.videoRefs, preparedMedia.audioRefs, signal, false, enableAudio);
       case 'volc_ark':
-        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal, true, enableAudio);
+        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, preparedMedia.images, videoResolution, duration, cameraFixed, onProgress, keyManager, preparedMedia.videoRefs, preparedMedia.audioRefs, signal, true, enableAudio);
       case 'wan':
-        return callWanVideoApi(currentApiKey, prompt, videoBaseUrl, model, processedImages, videoResolution, duration, enableAudio, onProgress, keyManager, signal);
+        return callWanVideoApi(currentApiKey, prompt, videoBaseUrl, model, preparedMedia.images, videoResolution, duration, enableAudio, onProgress, keyManager, signal);
       case 'kling':
-        return callKlingVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, duration, onProgress, keyManager, signal);
+        return callKlingVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, preparedMedia.images, duration, onProgress, keyManager, signal);
       case 'replicate':
-        return callReplicateVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, duration, videoResolution, onProgress, keyManager, signal);
+        return callReplicateVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, preparedMedia.images, duration, videoResolution, onProgress, keyManager, signal);
       default:
         // 统一格式: grok, veo, luma, runway, 海螺, 即梦, wan2.6, vidu 等
-        return callUnifiedVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, onProgress, keyManager, signal);
+        return callUnifiedVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, preparedMedia.images, videoResolution, duration, onProgress, keyManager, signal);
     }
   }, {
     maxRetries: 3,
@@ -569,7 +561,11 @@ async function callAgnesVideoApi(
   if (!submitResponse.ok) {
     const errorText = await submitResponse.text();
     console.error('[VideoGen] Agnes video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
+      provider: 'Agnes',
+      model,
+      route: '/v1/videos',
+    });
   }
 
   const submitData = await submitResponse.json();
@@ -712,7 +708,11 @@ async function callUnifiedVideoApi(
   });
   if (!resp.ok) {
     const errorText = await resp.text();
-    handleVideoSubmitError(resp.status, errorText, keyManager);
+    handleVideoSubmitError(resp.status, errorText, keyManager, {
+      provider: '统一视频接口',
+      model,
+      route: endpointPaths.submit,
+    });
   }
   const submitData = await resp.json();
 
@@ -790,7 +790,7 @@ async function callVolcVideoApi(
   baseUrl: string,
   model: string,
   aspectRatio: string,
-  imageWithRoles: Array<{ url: string; role: string; sourceUrl?: string }>,
+  imageWithRoles: PreparedVideoImageInput[],
   videoResolution?: string,
   duration?: number,
   cameraFixed?: boolean,
@@ -828,70 +828,17 @@ async function callVolcVideoApi(
     return textContent;
   };
 
-  const normalizeVolcImageDataUrl = (dataUrl: string, label: string, contentType?: string): string => {
-    try {
-      return normalizeImageDataUrlForApi(dataUrl);
-    } catch {
-      const mimeType = contentType || dataUrl.match(/^data:([^;,]+)/i)?.[1] || 'unknown';
-      throw new Error(`${label}返回的不是支持图片：content-type=${mimeType}`);
-    }
-  };
-
   const formatFetchError = (error: unknown): string => {
     const message = error instanceof Error ? error.message : String(error);
     return /failed to fetch/i.test(message) ? '网络请求失败' : message;
   };
 
-  const readVolcImageDataUrl = async (source: string, label: string): Promise<string> => {
-    if (typeof window !== 'undefined' && window.imageStorage?.readAsBase64) {
-      const dataUrl = await readImageAsBase64(source);
-      if (dataUrl) return normalizeVolcImageDataUrl(dataUrl, label);
-    }
-
-    if (isHttpMediaUrl(source)) {
-      let response: Response;
-      try {
-        response = await corsFetch(source);
-      } catch (error) {
-        throw new Error(`${label}下载失败：${formatFetchError(error)}`);
-      }
-      if (!response.ok) {
-        throw new Error(`${label}下载失败：HTTP ${response.status} ${response.statusText || ''}`.trim());
-      }
-      const contentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
-      const blob = await response.blob();
-      return normalizeVolcImageDataUrl(await blobToDataUrl(blob), label, contentType || blob.type);
-    }
-
-    return normalizeVolcImageDataUrl(await mediaUrlToDataUrl(source), label);
-  };
-
-  const toVolcImageDataUrl = async (img: { url: string; role?: string; sourceUrl?: string }): Promise<string> => {
-    const sources = [...new Set([img.url, img.sourceUrl].filter((source): source is string => !!source))];
-    const label = img.role === 'last_frame' ? '尾帧图' : '首帧图';
-    const errors: string[] = [];
-    for (const source of sources) {
-      try {
-        return await readVolcImageDataUrl(source, label);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        errors.push(message);
-        console.warn('[VideoGen] Volc image source conversion failed, trying fallback', {
-          sourceKind: source.startsWith('http') ? 'http' : source.startsWith('data:') ? 'data' : source.startsWith('local-image://') ? 'local-image' : 'other',
-          error: message,
-        });
-      }
-    }
-    throw new Error(errors.join('；') || `${label}读取失败：没有可用图片地址`);
-  };
-
   // 图片内容（首帧/尾帧）
   for (const img of imageWithRoles) {
     if (img.url) {
-      const imageUrl = await toVolcImageDataUrl(img);
       content.push({
         type: 'image_url',
-        image_url: { url: imageUrl },
+        image_url: { url: img.url },
         role: img.role,
       });
     }
@@ -948,9 +895,15 @@ async function callVolcVideoApi(
         body: JSON.stringify(buildRequestBody(prompt, structuredPrompt)),
       });
     } catch (error) {
-      const err = new Error(`视频任务提交失败：${formatFetchError(error)}`) as Error & { status?: number };
-      err.status = 503;
-      throw err;
+      throw createProviderError({
+        mediaKind: 'video',
+        stage: 'submit',
+        status: 503,
+        provider: officialArk ? '火山方舟' : 'Volc 兼容中转',
+        model,
+        route: taskUrls.routeLabel,
+        originalError: new Error(formatFetchError(error)),
+      });
     }
 
     if (!submitResponse.ok) {
@@ -960,7 +913,11 @@ async function callVolcVideoApi(
         return submitTask(true);
       }
       console.error('[VideoGen] Volc video submit error:', submitResponse.status, errorText);
-      handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+      handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
+        provider: officialArk ? '火山方舟' : 'Volc 兼容中转',
+        model,
+        route: taskUrls.routeLabel,
+      });
     }
 
     const data = await submitResponse.json();
@@ -985,7 +942,11 @@ async function callVolcVideoApi(
     // 尝试从错误信息中提取原始 HTTP 状态码
     const statusMatch = proxyMsg.match(/status\s+(\d+)/);
     const inferredStatus = statusMatch ? parseInt(statusMatch[1]) : 400;
-    handleVideoSubmitError(inferredStatus, JSON.stringify(submitData), keyManager);
+    handleVideoSubmitError(inferredStatus, JSON.stringify(submitData), keyManager, {
+      provider: officialArk ? '火山方舟' : 'Volc 兼容中转',
+      model,
+      route: taskUrls.routeLabel,
+    });
   }
 
   // 提取任务 ID（兼容多种响应格式）
@@ -1133,7 +1094,11 @@ async function callWanVideoApi(
   if (!submitResponse.ok) {
     const errorText = await submitResponse.text();
     console.error('[VideoGen] Wan video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
+      provider: '通义万相',
+      model,
+      route: '/alibailian/api/v1/services/aigc/video-generation/video-synthesis',
+    });
   }
 
   const submitData = await submitResponse.json();
@@ -1265,7 +1230,11 @@ async function callKlingVideoApi(
   if (!submitResponse.ok) {
     const errorText = await submitResponse.text();
     console.error('[VideoGen] Kling video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
+      provider: 'Kling',
+      model,
+      route: `/kling/v1/videos/${endpointPath}`,
+    });
   }
 
   const submitData = await submitResponse.json();
@@ -1364,7 +1333,11 @@ async function callOpenAIOfficialVideoApi(
   if (!submitResponse.ok) {
     const errorText = await submitResponse.text();
     console.error('[VideoGen] Sora video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
+      provider: 'OpenAI 官方视频',
+      model,
+      route: '/v1/videos',
+    });
   }
 
   const submitData = await submitResponse.json();
@@ -1455,7 +1428,11 @@ async function callReplicateVideoApi(
   if (!submitResponse.ok) {
     const errorText = await submitResponse.text();
     console.error('[VideoGen] Replicate video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
+      provider: 'Replicate',
+      model,
+      route: '/replicate/v1/predictions',
+    });
   }
 
   const submitData = await submitResponse.json();

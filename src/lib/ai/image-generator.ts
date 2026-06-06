@@ -12,6 +12,7 @@ import { retryOperation } from '@/lib/utils/retry';
 import { resolveImageApiFormat } from '@/lib/api-key-manager';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { corsFetch } from '@/lib/cors-fetch';
+import { createProviderError } from '@/lib/ai/provider-errors';
 import {
   isAgnesImageModel,
   isAgnesProvider,
@@ -264,6 +265,26 @@ type ImageKeyManager = {
   getCurrentKey?: () => string | null;
   handleError?: (status: number, errorText?: string) => boolean;
 };
+
+function handleImageHttpError(
+  status: number,
+  errorText: string,
+  keyManager?: ImageKeyManager,
+  context?: { provider?: string; model?: string; route?: string },
+): never {
+  if (keyManager?.handleError) {
+    keyManager.handleError(status, errorText);
+  }
+  throw createProviderError({
+    mediaKind: 'image',
+    stage: 'submit',
+    status,
+    errorText,
+    provider: context?.provider,
+    model: context?.model,
+    route: context?.route,
+  });
+}
 
 const IMAGE2_TOOL_MODEL = 'gpt-image-2';
 // Responses image_generation is a hosted tool call. The top-level model must be
@@ -969,21 +990,11 @@ async function submitOfficialOpenAIImageTask(params: {
 
     const text = await response.text();
     if (!response.ok) {
-      if (keyManager?.handleError) {
-        keyManager.handleError(response.status, text);
-      }
-
-      let message = `官方图片 API 错误: ${response.status}`;
-      try {
-        const errorJson = JSON.parse(text);
-        message = errorJson.error?.message || errorJson.message || message;
-      } catch {
-        if (text && text.length < 200) message = text;
-      }
-
-      const error = new Error(message) as Error & { status?: number };
-      error.status = response.status;
-      throw error;
+      handleImageHttpError(response.status, text, keyManager, {
+        provider: 'OpenAI 官方图片',
+        model,
+        route: endpoint,
+      });
     }
 
     try {
@@ -1108,21 +1119,11 @@ async function submitViaResponsesImage(
 
       const text = await response.text();
       if (!response.ok) {
-        if (keyManager?.handleError) {
-          keyManager.handleError(response.status, text);
-        }
-
-        let message = `Responses 图片生成 API 错误: ${response.status}`;
-        try {
-          const errorJson = JSON.parse(text);
-          message = errorJson.error?.message || errorJson.message || message;
-        } catch {
-          if (text && text.length < 200) message = text;
-        }
-
-        const error = new Error(message) as Error & { status?: number };
-        error.status = response.status;
-        throw error;
+        handleImageHttpError(response.status, text, keyManager, {
+          provider: 'Responses 图片工具',
+          model: imageModel,
+          route: endpoint,
+        });
       }
 
       return text;
@@ -1288,27 +1289,11 @@ async function submitViaChatCompletions(
       if (!resp.ok) {
         const errorText = await resp.text();
         console.error('[ImageGenerator] Chat completions error:', resp.status, errorText);
-
-        // 通知 keyManager 处理错误（触发 rotate）
-        if (keyManager?.handleError) {
-          keyManager.handleError(resp.status, errorText);
-        }
-
-        let msg = `图片生成 API 错误: ${resp.status}`;
-        try { const j = JSON.parse(errorText); msg = j.error?.message || msg; } catch {}
-
-        // 401 专项提示：引导用户检查 API Key
-        if (resp.status === 401) {
-          msg = `API Key 无效或已过期，请前往「设置」检查图片生成服务的 API Key 配置（原始信息：${msg}）`;
-        }
-        // 502 专项提示：上游服务临时不可用
-        if (resp.status === 502) {
-          msg = `API 上游服务暂时不可用（502），将自动重试（原始信息：${msg}）`;
-        }
-
-        const err = new Error(msg) as Error & { status?: number };
-        err.status = resp.status;
-        throw err;
+        handleImageHttpError(resp.status, errorText, keyManager, {
+          provider: 'Chat Completions 图片',
+          model,
+          route: endpoint,
+        });
       }
 
       return resp;
@@ -1519,36 +1504,11 @@ async function submitImageTask(
         if (!response.ok) {
           const errorText = await response.text();
           console.error('[ImageGenerator] API error:', response.status, errorText);
-
-          // 通知 keyManager 处理错误（触发 rotate）
-          if (keyManager?.handleError) {
-            keyManager.handleError(response.status, errorText);
-          }
-
-          let errorMessage = `图片生成 API 错误: ${response.status}`;
-          try {
-            const errorJson = JSON.parse(errorText);
-            errorMessage = errorJson.error?.message || errorJson.message || errorJson.msg || errorMessage;
-          } catch {
-            if (errorText && errorText.length < 200) errorMessage = errorText;
-          }
-
-          if (response.status === 401 || response.status === 403) {
-            throw new Error('API Key 无效或已过期');
-          } else if (response.status === 529 || response.status === 503) {
-            // 上游负载饱和/服务不可用，需要触发重试
-            const err = new Error(errorMessage || `上游服务暂时不可用 (${response.status})`) as Error & { status?: number };
-            err.status = response.status;
-            throw err;
-          } else if (response.status >= 500) {
-            const err = new Error(errorMessage || '图片生成服务暂时不可用') as Error & { status?: number };
-            err.status = response.status;
-            throw err;
-          }
-
-          const error = new Error(errorMessage) as Error & { status?: number };
-          error.status = response.status;
-          throw error;
+          handleImageHttpError(response.status, errorText, keyManager, {
+            provider: providerPlatform,
+            model,
+            route: endpoint,
+          });
         }
 
         const text = await response.text();
@@ -1822,19 +1782,11 @@ export async function submitGridImageRequest(params: {
 
     if (!response.ok) {
       const errorText = await response.text();
-      // 通知 keyManager 处理错误（触发 rotate）
-      if (keyManager?.handleError) {
-        keyManager.handleError(response.status, errorText);
-      }
-      let errorMessage = `API 失败: ${response.status}`;
-      try {
-        const errJson = JSON.parse(errorText);
-        errorMessage = errJson.error?.message || errJson.message || errorMessage;
-      } catch { /* ignore */ }
-      if (errorText && errorText.length < 200) errorMessage = errorMessage || errorText;
-      const err = new Error(errorMessage) as Error & { status?: number };
-      err.status = response.status;
-      throw err;
+      handleImageHttpError(response.status, errorText, keyManager, {
+        provider: params.providerPlatform,
+        model: normalizedModel,
+        route: endpoint,
+      });
     }
 
     return response.json();
@@ -1932,12 +1884,11 @@ async function submitViaKlingImages(
 
     if (!response.ok) {
       const errText = await response.text();
-      if (keyManager?.handleError) {
-        keyManager.handleError(response.status, errText);
-      }
-      const err = new Error(`Kling image API 错误: ${response.status} ${errText}`) as Error & { status?: number };
-      err.status = response.status;
-      throw err;
+      handleImageHttpError(response.status, errText, keyManager, {
+        provider: 'Kling',
+        model,
+        route: `${rootBase}/${nativePath}`,
+      });
     }
 
     return response.json();
