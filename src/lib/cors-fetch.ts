@@ -53,7 +53,7 @@ function summarizeFetchTarget(targetUrl: string): string {
 
 function normalizeFetchFailure(error?: string): string {
   if (!error) return '未知网络错误';
-  return /failed to fetch/i.test(error) ? '网络请求失败' : error;
+  return error;
 }
 
 async function serializeFormData(formData: FormData): Promise<Array<{

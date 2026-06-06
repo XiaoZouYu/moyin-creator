@@ -830,7 +830,7 @@ async function callVolcVideoApi(
 
   const formatFetchError = (error: unknown): string => {
     const message = error instanceof Error ? error.message : String(error);
-    return /failed to fetch/i.test(message) ? '网络请求失败' : message;
+    return message;
   };
 
   // 图片内容（首帧/尾帧）

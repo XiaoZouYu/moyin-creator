@@ -92,7 +92,7 @@ function normalizeProviderImageDataUrl(dataUrl: string, label: string, contentTy
 
 function formatFetchError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return /failed to fetch/i.test(message) ? '网络请求失败' : message;
+  return message;
 }
 
 async function readProviderImageDataUrl(source: string, label: string): Promise<string> {
