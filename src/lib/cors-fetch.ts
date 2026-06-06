@@ -9,14 +9,13 @@
  * - 浏览器模式       → 对跨域 URL 通过 /__api_proxy 或 VITE_WEB_API_PROXY_URL 代理转发
  */
 
-/** 检测是否在 Electron 环境中运行 */
-function isElectron(): boolean {
+/** 检测是否在原生 Electron 环境中运行；Web 兼容层注入的 electronAPI 不算。 */
+function isNativeElectron(): boolean {
   return !!(
     typeof window !== 'undefined' &&
     (
       (window as any).electron ||
       (window as any).ipcRenderer ||
-      (window as any).electronAPI ||
       navigator.userAgent.includes('Electron')
     )
   );
@@ -165,7 +164,7 @@ export async function corsFetch(
 ): Promise<Response> {
   const targetUrl = url.toString();
 
-  if (typeof window !== 'undefined' && window.electronAPI?.apiFetch) {
+  if (typeof window !== 'undefined' && isNativeElectron() && window.electronAPI?.apiFetch) {
     const requestHeaders = new Headers(init?.headers);
     const headers: Record<string, string> = {};
     requestHeaders.forEach((value, key) => {
@@ -195,7 +194,7 @@ export async function corsFetch(
   }
 
   // Electron 或同源/非 HTTP 请求：直连
-  if (isElectron() || !shouldProxyUrl(targetUrl)) {
+  if (isNativeElectron() || !shouldProxyUrl(targetUrl)) {
     return fetch(targetUrl, init);
   }
 

@@ -1082,20 +1082,11 @@ function fetchBinaryViaNode(
 
 function getFetchErrorMessage(error: unknown) {
   if (error instanceof Error) {
-    const details: string[] = [error.message || error.name]
-    const code = (error as Error & { code?: unknown }).code
-    if (code) details.push(`code: ${String(code)}`)
     const cause = (error as Error & { cause?: unknown }).cause
-    if (cause instanceof Error) {
-      if (cause.message && cause.message !== error.message) {
-        details.push(`cause: ${cause.message}`)
-      }
-      const causeCode = (cause as Error & { code?: unknown }).code
-      if (causeCode) details.push(`cause code: ${String(causeCode)}`)
-    } else if (cause) {
-      details.push(`cause: ${String(cause)}`)
+    if (cause instanceof Error && cause.message && cause.message !== error.message) {
+      return `${error.message}; cause: ${cause.message}`
     }
-    return details.filter(Boolean).join('; ')
+    return error.message
   }
   return String(error || 'unknown error')
 }
@@ -2350,7 +2341,7 @@ ipcMain.handle('api-fetch', async (_event, request: ApiFetchRequest): Promise<Ap
       body: responseText,
     }
   } catch (error) {
-    const message = getFetchErrorMessage(error)
+    const message = error instanceof Error ? error.message : 'API request failed'
     if (shouldTrace) {
       console.error('[API Fetch] failed', {
         url: request.url,
