@@ -1295,8 +1295,8 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           });
 
           if (!submitResponse.ok) {
-            const errorData = await submitResponse.json().catch(() => ({}));
-            throw new Error(errorData.error || `Video API failed: ${submitResponse.status}`);
+            const errorText = await submitResponse.text();
+            throw new Error(errorText.trim() || `HTTP ${submitResponse.status}`);
           }
 
           const submitData = await submitResponse.json();
