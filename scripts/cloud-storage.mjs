@@ -8,11 +8,17 @@ const { Pool } = pg
 const DEFAULT_TABLE_NAME = 'moyin_user_storage'
 const DEFAULT_OSS_PREFIX = 'mj/'
 const MAX_CLOUD_BODY_BYTES = Number(process.env.MAX_CLOUD_BODY_BYTES || 200 * 1024 * 1024)
+const CLOUD_UNAVAILABLE_RETRY_MS = Number(process.env.CLOUD_UNAVAILABLE_RETRY_MS || 30_000)
 
 let dotenvLoaded = false
 let pool = null
 let schemaReady = false
 let ossClient = null
+let postgresUnavailableUntil = 0
+let postgresUnavailableDetail = ''
+let ossUnavailableUntil = 0
+let ossUnavailableDetail = ''
+const failureLogState = new Map()
 
 function loadDotenv() {
   if (dotenvLoaded) return
@@ -46,6 +52,69 @@ function sendJson(res, status, body) {
     'access-control-allow-headers': '*',
   })
   res.end(JSON.stringify(body))
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function temporarilyUnavailable(message) {
+  const error = new Error(message)
+  error.statusCode = 503
+  return error
+}
+
+function markPostgresUnavailable(error) {
+  postgresUnavailableUntil = Date.now() + CLOUD_UNAVAILABLE_RETRY_MS
+  postgresUnavailableDetail = errorMessage(error)
+  schemaReady = false
+
+  if (pool) {
+    const stalePool = pool
+    pool = null
+    void stalePool.end().catch(() => undefined)
+  }
+}
+
+function assertPostgresAvailable() {
+  if (Date.now() >= postgresUnavailableUntil) return
+  throw temporarilyUnavailable(postgresUnavailableDetail || 'PostgreSQL is temporarily unavailable')
+}
+
+function markOssUnavailable(error) {
+  ossUnavailableUntil = Date.now() + CLOUD_UNAVAILABLE_RETRY_MS
+  ossUnavailableDetail = errorMessage(error)
+  ossClient = null
+}
+
+function assertOssAvailable() {
+  if (Date.now() >= ossUnavailableUntil) return
+  throw temporarilyUnavailable(ossUnavailableDetail || 'OSS is temporarily unavailable')
+}
+
+function isTemporaryInfrastructureError(error) {
+  const message = errorMessage(error)
+  return /configured|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|timeout|password authentication failed|role ".*" does not exist|database ".*" does not exist|no pg_hba|Connection terminated|OSS|AccessDenied|InvalidAccessKeyId|SignatureDoesNotMatch|NoSuchBucket/i.test(message)
+}
+
+function httpStatusForError(error) {
+  if (typeof error?.statusCode === 'number') return error.statusCode
+  return isTemporaryInfrastructureError(error) ? 503 : 500
+}
+
+function logRequestFailure(scope, error, status) {
+  const message = errorMessage(error)
+  if (status !== 503) {
+    console.error(`[${scope}] request failed:`, error)
+    return
+  }
+
+  const now = Date.now()
+  const state = failureLogState.get(scope)
+  if (state?.message === message && now < state.until) return
+
+  failureLogState.set(scope, { message, until: now + CLOUD_UNAVAILABLE_RETRY_MS })
+  console.warn(`[${scope}] temporarily unavailable: ${message}`)
 }
 
 async function readBody(req) {
@@ -89,6 +158,7 @@ function tableName() {
 
 function getPool() {
   loadDotenv()
+  assertPostgresAvailable()
   if (pool) return pool
 
   const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL
@@ -100,28 +170,38 @@ function getPool() {
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
   })
   pool.on('error', (error) => {
-    console.error('[cloud-storage] PostgreSQL pool error:', error)
+    markPostgresUnavailable(error)
+    logRequestFailure('cloud-storage', error, 503)
   })
   return pool
 }
 
 async function ensureSchema() {
   const db = getPool()
-  if (!db) throw new Error('DATABASE_URL is not configured')
+  if (!db) {
+    const error = temporarilyUnavailable('DATABASE_URL is not configured')
+    markPostgresUnavailable(error)
+    throw error
+  }
   if (schemaReady) return db
 
   const table = tableName()
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS ${table} (
-      key TEXT PRIMARY KEY,
-      user_segment TEXT NOT NULL,
-      value TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `)
-  await db.query(`CREATE INDEX IF NOT EXISTS ${table}_user_segment_idx ON ${table} (user_segment)`)
-  await db.query(`CREATE INDEX IF NOT EXISTS ${table}_key_prefix_idx ON ${table} (key text_pattern_ops)`)
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ${table} (
+        key TEXT PRIMARY KEY,
+        user_segment TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+    await db.query(`CREATE INDEX IF NOT EXISTS ${table}_user_segment_idx ON ${table} (user_segment)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS ${table}_key_prefix_idx ON ${table} (key text_pattern_ops)`)
+  } catch (error) {
+    markPostgresUnavailable(error)
+    throw temporarilyUnavailable(errorMessage(error))
+  }
 
   schemaReady = true
   return db
@@ -129,6 +209,7 @@ async function ensureSchema() {
 
 function getOssClient() {
   loadDotenv()
+  assertOssAvailable()
   if (ossClient) return ossClient
 
   const accessKeyId = process.env.ALI_OSS_ACCESS_KEY_ID || process.env.OSS_ACCESS_KEY_ID
@@ -199,11 +280,24 @@ export async function handleCloudStorageRequest(req, res) {
 
   try {
     if (action === 'status') {
-      sendJson(res, 200, {
-        enabled: !!getPool(),
-        postgres: !!getPool(),
-        table: tableName(),
-      })
+      try {
+        await ensureSchema()
+        sendJson(res, 200, {
+          enabled: true,
+          postgres: true,
+          table: tableName(),
+        })
+      } catch (error) {
+        const status = httpStatusForError(error)
+        if (status !== 503) throw error
+        logRequestFailure('cloud-storage', error, status)
+        sendJson(res, 200, {
+          enabled: false,
+          postgres: false,
+          table: tableName(),
+          detail: errorMessage(error),
+        })
+      }
       return
     }
 
@@ -281,10 +375,11 @@ export async function handleCloudStorageRequest(req, res) {
 
     sendJson(res, 404, { error: 'Unknown cloud storage endpoint' })
   } catch (error) {
-    console.error('[cloud-storage] request failed:', error)
-    sendJson(res, error.message?.includes('configured') ? 503 : 500, {
+    const status = httpStatusForError(error)
+    logRequestFailure('cloud-storage', error, status)
+    sendJson(res, status, {
       error: 'Cloud storage request failed',
-      detail: error instanceof Error ? error.message : String(error),
+      detail: errorMessage(error),
     })
   }
 }
@@ -303,19 +398,36 @@ export async function handleCloudMediaRequest(req, res) {
 
   try {
     if (action === 'status') {
+      let enabled = false
+      let detail = ''
+      try {
+        enabled = !!getOssClient()
+        if (!enabled) detail = 'OSS is not configured'
+      } catch (error) {
+        const status = httpStatusForError(error)
+        if (status !== 503) throw error
+        logRequestFailure('cloud-media', error, status)
+        detail = errorMessage(error)
+      }
+
       sendJson(res, 200, {
-        enabled: !!getOssClient(),
-        oss: !!getOssClient(),
+        enabled,
+        oss: enabled,
         bucket: process.env.ALI_OSS_BUCKET || process.env.OSS_BUCKET || '',
         prefix: process.env.ALI_OSS_PREFIX || process.env.OSS_PREFIX || DEFAULT_OSS_PREFIX,
         publicBaseUrl: process.env.ALI_OSS_PUBLIC_BASE_URL || process.env.OSS_PUBLIC_BASE_URL || '',
         publicRead: (process.env.ALI_OSS_PUBLIC_READ || process.env.OSS_PUBLIC_READ || '').toLowerCase() === 'true',
+        detail,
       })
       return
     }
 
     const client = getOssClient()
-    if (!client) throw new Error('OSS is not configured')
+    if (!client) {
+      const error = temporarilyUnavailable('OSS is not configured')
+      markOssUnavailable(error)
+      throw error
+    }
 
     if (action === 'item' && (req.method === 'POST' || req.method === 'PUT')) {
       const body = await readJsonBody(req)
@@ -379,10 +491,12 @@ export async function handleCloudMediaRequest(req, res) {
 
     sendJson(res, 404, { error: 'Unknown cloud media endpoint' })
   } catch (error) {
-    console.error('[cloud-media] request failed:', error)
-    sendJson(res, error.message?.includes('configured') ? 503 : 500, {
+    const status = httpStatusForError(error)
+    if (status === 503) markOssUnavailable(error)
+    logRequestFailure('cloud-media', error, status)
+    sendJson(res, status, {
       error: 'Cloud media request failed',
-      detail: error instanceof Error ? error.message : String(error),
+      detail: errorMessage(error),
     })
   }
 }

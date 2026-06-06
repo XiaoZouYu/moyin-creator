@@ -311,13 +311,72 @@ async function webFetch(targetUrl: string, init?: RequestInit): Promise<Response
 
 let cloudStorageUnavailableUntil = 0
 let cloudMediaUnavailableUntil = 0
+let cloudStorageAvailableUntil = 0
+let cloudMediaAvailableUntil = 0
+let cloudStorageProbePromise: Promise<void> | null = null
+let cloudMediaProbePromise: Promise<void> | null = null
 
 function markCloudStorageUnavailable() {
   cloudStorageUnavailableUntil = Date.now() + 30_000
+  cloudStorageAvailableUntil = 0
 }
 
 function markCloudMediaUnavailable() {
   cloudMediaUnavailableUntil = Date.now() + 30_000
+  cloudMediaAvailableUntil = 0
+}
+
+function markCloudStorageAvailable() {
+  cloudStorageAvailableUntil = Date.now() + 30_000
+}
+
+function markCloudMediaAvailable() {
+  cloudMediaAvailableUntil = Date.now() + 30_000
+}
+
+async function probeCloudEndpoint(isMedia: boolean): Promise<void> {
+  const path = isMedia ? '/__cloud_media/status' : '/__cloud_storage/status'
+  const response = await fetch(path)
+  const contentType = response.headers.get('content-type') || ''
+  if (!contentType.includes('application/json')) {
+    if (isMedia) markCloudMediaUnavailable()
+    else markCloudStorageUnavailable()
+    throw new Error('Cloud persistence API did not return JSON')
+  }
+
+  const data = await response.json()
+  if (!response.ok || data?.enabled === false) {
+    if (isMedia) markCloudMediaUnavailable()
+    else markCloudStorageUnavailable()
+    throw new Error(data?.detail || data?.error || 'Cloud persistence API is temporarily unavailable')
+  }
+
+  if (isMedia) markCloudMediaAvailable()
+  else markCloudStorageAvailable()
+}
+
+async function ensureCloudEndpointAvailable(isMedia: boolean): Promise<void> {
+  const now = Date.now()
+  const unavailableUntil = isMedia ? cloudMediaUnavailableUntil : cloudStorageUnavailableUntil
+  if (now < unavailableUntil) {
+    throw new Error('Cloud persistence API is temporarily unavailable')
+  }
+
+  const availableUntil = isMedia ? cloudMediaAvailableUntil : cloudStorageAvailableUntil
+  if (now < availableUntil) return
+
+  if (isMedia) {
+    cloudMediaProbePromise ||= probeCloudEndpoint(true).finally(() => {
+      cloudMediaProbePromise = null
+    })
+    await cloudMediaProbePromise
+    return
+  }
+
+  cloudStorageProbePromise ||= probeCloudEndpoint(false).finally(() => {
+    cloudStorageProbePromise = null
+  })
+  await cloudStorageProbePromise
 }
 
 async function fetchCloudJson<T = any>(
@@ -326,9 +385,7 @@ async function fetchCloudJson<T = any>(
   options?: { media?: boolean },
 ): Promise<T> {
   const isMedia = !!options?.media
-  if (Date.now() < (isMedia ? cloudMediaUnavailableUntil : cloudStorageUnavailableUntil)) {
-    throw new Error('Cloud persistence API is temporarily unavailable')
-  }
+  await ensureCloudEndpointAvailable(isMedia)
 
   const response = await fetch(path, {
     ...init,
@@ -346,10 +403,8 @@ async function fetchCloudJson<T = any>(
 
   const data = await response.json()
   if (!response.ok) {
-    if (response.status === 404 || response.status === 503) {
-      if (isMedia) markCloudMediaUnavailable()
-      else markCloudStorageUnavailable()
-    }
+    if (isMedia) markCloudMediaUnavailable()
+    else markCloudStorageUnavailable()
     throw new Error(data?.detail || data?.error || `Cloud persistence API failed: ${response.status}`)
   }
 
