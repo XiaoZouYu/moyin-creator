@@ -196,80 +196,18 @@ function classifyProviderError(status: number | undefined, code: string | undefi
   return 'unknown';
 }
 
-function mediaLabel(kind: ProviderMediaKind): string {
-  switch (kind) {
-    case 'image':
-      return '图片生成';
-    case 'video':
-      return '视频生成';
-    case 'audio':
-      return '音频处理';
-    default:
-      return '媒体处理';
-  }
-}
-
-function stageLabel(stage: ProviderOperationStage): string {
-  switch (stage) {
-    case 'prepare':
-      return '参数准备';
-    case 'download':
-      return '媒体读取';
-    case 'submit':
-      return '任务提交';
-    case 'poll':
-      return '任务查询';
-    case 'parse':
-      return '结果解析';
-    default:
-      return '处理';
-  }
-}
-
-function categoryMessage(category: ProviderErrorCategory, status: number | undefined, rawMessage: string): string {
-  switch (category) {
-    case 'auth':
-      if (/format is incorrect|格式/i.test(rawMessage)) return 'API Key 格式不正确，请检查供应商类型、Base URL 和 Key 是否匹配';
-      return 'API Key 无效或已过期，请检查当前供应商的 Key 配置';
-    case 'quota':
-      return '账号欠费或余额不足，请到供应商控制台充值或结清欠款后重试';
-    case 'rate_limit':
-      return 'API 请求过于频繁，请稍后重试';
-    case 'content_moderation':
-      return '内容审核未通过，请调整提示词或参考素材后重试';
-    case 'not_found':
-      return '任务不存在或已过期';
-    case 'server':
-      return `上游服务暂时不可用${status ? `（HTTP ${status}）` : ''}`;
-    case 'bad_request':
-      return rawMessage || `请求参数不被供应商接受${status ? `（HTTP ${status}）` : ''}`;
-    case 'transport':
-      return rawMessage || '网络请求失败';
-    default:
-      return rawMessage || `供应商返回错误${status ? `（HTTP ${status}）` : ''}`;
-  }
-}
-
-function contextLabel(context: ProviderErrorContext): string {
-  const parts = [context.provider, context.model, context.route].filter(Boolean);
-  return parts.length > 0 ? `（${parts.join(' / ')}）` : '';
-}
-
 export function normalizeProviderError(context: ProviderErrorContext): ProviderErrorDetails {
   const parsed = parseProviderErrorBody(context.errorText);
   const originalMessage = getOriginalErrorMessage(context.originalError);
-  const rawMessage = parsed.message || context.fallbackMessage || originalMessage || '';
+  const rawMessage = context.errorText?.trim() || originalMessage || context.fallbackMessage || parsed.message || '';
   const category = classifyProviderError(context.status, parsed.code, rawMessage);
-  const base = `${mediaLabel(context.mediaKind)}${stageLabel(context.stage)}失败${contextLabel(context)}`;
-  const detail = categoryMessage(category, context.status, rawMessage);
-  const original = rawMessage && rawMessage !== detail ? `（原始信息：${rawMessage.slice(0, 240)}）` : '';
 
   return {
     category,
     status: context.status,
     code: parsed.code,
     rawMessage,
-    message: `${base}：${detail}${original}`,
+    message: rawMessage || `HTTP ${context.status ?? 'unknown'}`,
   };
 }
 
@@ -281,6 +219,13 @@ export function createProviderError(context: ProviderErrorContext): ProviderErro
   error.category = normalized.category;
   error.providerStage = context.stage;
   return error;
+}
+
+export async function throwUpstreamResponseError(response: Response): Promise<never> {
+  const errorText = await response.text();
+  const error = new Error(errorText.trim() || `HTTP ${response.status}`) as ProviderError;
+  error.status = response.status;
+  throw error;
 }
 
 export function isProviderContentModerationError(error: unknown): boolean {

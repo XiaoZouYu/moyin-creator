@@ -12,7 +12,7 @@ import { retryOperation } from '@/lib/utils/retry';
 import { resolveImageApiFormat } from '@/lib/api-key-manager';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { corsFetch } from '@/lib/cors-fetch';
-import { createProviderError } from '@/lib/ai/provider-errors';
+import { createProviderError, throwUpstreamResponseError } from '@/lib/ai/provider-errors';
 import {
   isAgnesImageModel,
   isAgnesProvider,
@@ -704,17 +704,14 @@ async function pollResponsesImageResponse(
       if (keyManager?.handleError) {
         keyManager.handleError(response.status, text);
       }
-
-      let message = `Responses 图片结果轮询失败: ${response.status}`;
-      try {
-        const errorJson = JSON.parse(text);
-        message = errorJson.error?.message || errorJson.message || message;
-      } catch {
-        if (text && text.length < 200) message = text;
-      }
-      const error = new Error(message) as Error & { status?: number };
-      error.status = response.status;
-      throw error;
+      throw createProviderError({
+        mediaKind: 'image',
+        stage: 'poll',
+        status: response.status,
+        errorText: text,
+        provider: 'Responses 图片工具',
+        route: pollUrl,
+      });
     }
 
     try {
@@ -1613,8 +1610,7 @@ async function pollTaskStatus(
       });
 
       if (!response.ok) {
-        if (response.status === 404) throw new Error('Task not found');
-        throw new Error(`Failed to check task status: ${response.status}`);
+        await throwUpstreamResponseError(response);
       }
 
       const data = await response.json();

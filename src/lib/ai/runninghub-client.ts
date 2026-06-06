@@ -8,6 +8,7 @@
 
 import { retryOperation } from '@/lib/utils/retry';
 import { corsFetch } from '@/lib/cors-fetch';
+import { throwUpstreamResponseError } from '@/lib/ai/provider-errors';
 import type { HorizontalDirection, ElevationAngle, ShotSize } from './runninghub-angles';
 import { generateAnglePrompt } from './runninghub-angles';
 
@@ -82,22 +83,7 @@ export async function submitAngleSwitchTask(
       if (!response.ok) {
         const errorText = await response.text();
         console.error('[RunningHub] Submit error:', response.status, errorText);
-
-        let errorMessage = `RunningHub API error: ${response.status}`;
-        try {
-          const errorJson = JSON.parse(errorText);
-          errorMessage = errorJson.error?.message || errorJson.message || errorJson.msg || errorMessage;
-        } catch {
-          if (errorText && errorText.length < 200) errorMessage = errorText;
-        }
-
-        const error = new Error(
-          response.status === 401 || response.status === 403
-            ? 'API Key 无效或已过期'
-            : response.status >= 500
-              ? 'RunningHub 服务暂时不可用'
-              : errorMessage
-        ) as Error & { status?: number };
+        const error = new Error(errorText.trim() || `HTTP ${response.status}`) as Error & { status?: number };
         error.status = response.status;
         throw error;
       }
@@ -149,10 +135,7 @@ export async function queryTaskStatus(
     });
 
     if (!response.ok) {
-      if (response.status === 404) {
-        throw new Error('Task not found');
-      }
-      throw new Error(`Query failed: ${response.status}`);
+      await throwUpstreamResponseError(response);
     }
 
     const data = await response.json();

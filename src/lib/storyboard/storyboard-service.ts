@@ -14,6 +14,7 @@ import { retryOperation } from "@/lib/utils/retry";
 import { delay, RATE_LIMITS } from "@/lib/utils/rate-limiter";
 import { submitGridImageRequest } from '@/lib/ai/image-generator';
 import { corsFetch } from '@/lib/cors-fetch';
+import { throwUpstreamResponseError } from '@/lib/ai/provider-errors';
 
 export interface StoryboardGenerationConfig {
   storyPrompt: string;
@@ -115,24 +116,7 @@ async function submitImageGenTask(
       if (!response.ok) {
         const errorText = await response.text();
         console.error('[StoryboardService] Image API error:', response.status, errorText);
-
-        let errorMessage = `鍥剧墖鐢熸垚 API 閿欒: ${response.status}`;
-        try {
-          const errorJson = JSON.parse(errorText);
-          errorMessage = errorJson.error?.message || errorJson.message || errorJson.msg || errorMessage;
-        } catch {
-          if (errorText && errorText.length < 200) {
-            errorMessage = errorText;
-          }
-        }
-
-        const error = new Error(
-          response.status === 401 || response.status === 403
-            ? 'API Key 无效或已过期，请检查配置'
-            : response.status >= 500
-              ? '图片生成服务暂时不可用，请稍后再试'
-              : errorMessage
-        ) as Error & { status?: number };
+        const error = new Error(errorText.trim() || `HTTP ${response.status}`) as Error & { status?: number };
         error.status = response.status;
         throw error;
       }
@@ -216,7 +200,7 @@ async function submitZhipuImageTask(
   if (!response.ok) {
     const errorText = await response.text();
     console.error('[StoryboardService] Zhipu error:', response.status, errorText);
-    const error = new Error(`Zhipu API error: ${response.status}`) as Error & { status?: number };
+    const error = new Error(errorText.trim() || `HTTP ${response.status}`) as Error & { status?: number };
     error.status = response.status;
     throw error;
   }
@@ -276,10 +260,7 @@ async function pollTaskCompletion(
       });
 
       if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error('Task not found');
-        }
-        throw new Error(`Failed to check task status: ${response.status}`);
+        await throwUpstreamResponseError(response);
       }
 
       const data = await response.json();
@@ -581,22 +562,7 @@ async function submitVideoGenTask(
     if (!response.ok) {
       const errorText = await response.text();
         console.error('[StoryboardService] Video API error:', response.status, errorText);
-
-        let errorMessage = `Video API error: ${response.status}`;
-      try {
-        const errorJson = JSON.parse(errorText);
-        errorMessage = errorJson.error?.message || errorJson.message || errorJson.msg || errorMessage;
-      } catch {
-        if (errorText && errorText.length < 200) {
-          errorMessage = errorText;
-        }
-      }
-
-      if (response.status === 401 || response.status === 403) {
-        throw new Error('API Key 无效或已过期，请检查配置');
-      }
-
-      const error = new Error(errorMessage) as Error & { status?: number };
+      const error = new Error(errorText.trim() || `HTTP ${response.status}`) as Error & { status?: number };
       error.status = response.status;
       throw error;
     }

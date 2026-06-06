@@ -367,7 +367,7 @@ export async function callChatAPI(
         }
       }
       
-      const error = new Error(`API request failed: ${response.status} - ${errorText}`);
+      const error = new Error(errorText.trim() || `HTTP ${response.status}`);
       (error as any).status = response.status;
       throw error;
     }

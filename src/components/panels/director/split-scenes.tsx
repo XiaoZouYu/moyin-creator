@@ -11,6 +11,7 @@
 import React, { useState, useCallback, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { corsFetch } from "@/lib/cors-fetch";
+import { throwUpstreamResponseError } from "@/lib/ai/provider-errors";
 import { Button } from "@/components/ui/button";
 import { 
   useDirectorStore, 
@@ -294,14 +295,13 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
   const PAGE_CONCURRENCY = 2; // 每页并发集群数限制
   // 合并生成停止控制
   const mergedAbortRef = useRef(false);
-  // 首帧/视频/尾帧生成的 AbortController（用于真正取消底层 fetch 和轮询）
-  const imageAbortRef = useRef<AbortController | null>(null);
-  const videoAbortRef = useRef<AbortController | null>(null);
-  const endFrameAbortRef = useRef<AbortController | null>(null);
+  // 首帧/视频/尾帧生成的 AbortController（按分镜隔离，避免并发时停止错任务）
+  const imageAbortRef = useRef(new Map<number, AbortController>());
+  const videoAbortRef = useRef(new Map<number, AbortController>());
+  const endFrameAbortRef = useRef(new Map<number, AbortController>());
   // 合并生成控件将在 JSX 中内联渲染，避免闭包引用问题
   const [isGenerating, setIsGenerating] = useState(false);
   const [isGeneratingPrompts, setIsGeneratingPrompts] = useState(false);
-  const [currentGeneratingId, setCurrentGeneratingId] = useState<number | null>(null);
   // Tab 状态: 分镜编辑 vs 预告片
   const [activeTab, setActiveTab] = useState<"editing" | "trailer">("editing");
 
@@ -376,6 +376,18 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
     });
     return filtered;
   }, [splitScenes]);
+
+  const isSceneCardLocked = useCallback((scene: SplitScene) => {
+    const isSceneGenerating =
+      scene.imageStatus === 'generating' ||
+      scene.imageStatus === 'uploading' ||
+      scene.videoStatus === 'generating' ||
+      scene.videoStatus === 'uploading' ||
+      scene.endFrameStatus === 'generating' ||
+      scene.endFrameStatus === 'uploading';
+
+    return isGenerating || isSceneGenerating;
+  }, [isGenerating]);
 
   const {
     activeProjectId,
@@ -617,7 +629,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       // 插入到下一个分镜的首帧
       updateSplitSceneImage(nextScene.id, persistResult.localPath, nextScene.width, nextScene.height, persistResult.httpUrl || undefined);
       toast.success(`分镜 ${sceneId + 1} 尾帧已插入到分镜 ${nextScene.id + 1} 首帧`);
-      
     } catch (e) {
       console.error('[SplitScenes] Extract last frame error:', e);
       toast.error('提取帧失败');
@@ -629,42 +640,37 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
   // ========== 停止生成处理函数 ==========
   // 停止首帧图片生成
   const handleStopImageGeneration = useCallback((sceneId: number) => {
-    imageAbortRef.current?.abort();
-    imageAbortRef.current = null;
+    imageAbortRef.current.get(sceneId)?.abort();
+    imageAbortRef.current.delete(sceneId);
     updateSplitSceneImageStatus(sceneId, {
       imageStatus: 'idle',
       imageProgress: 0,
       imageError: '用户已取消',
     });
-    setIsGenerating(false);
-    setCurrentGeneratingId(null);
     toast.info(`分镜 ${sceneId + 1} 首帧生成已停止`);
   }, [updateSplitSceneImageStatus]);
 
   // 停止视频生成
   const handleStopVideoGeneration = useCallback((sceneId: number) => {
-    videoAbortRef.current?.abort();
-    videoAbortRef.current = null;
+    videoAbortRef.current.get(sceneId)?.abort();
+    videoAbortRef.current.delete(sceneId);
     updateSplitSceneVideo(sceneId, {
       videoStatus: 'idle',
       videoProgress: 0,
       videoError: '用户已取消',
     });
-    setIsGenerating(false);
-    setCurrentGeneratingId(null);
     toast.info(`分镜 ${sceneId + 1} 视频生成已停止`);
   }, [updateSplitSceneVideo]);
 
   // 停止尾帧图片生成
   const handleStopEndFrameGeneration = useCallback((sceneId: number) => {
-    endFrameAbortRef.current?.abort();
-    endFrameAbortRef.current = null;
+    endFrameAbortRef.current.get(sceneId)?.abort();
+    endFrameAbortRef.current.delete(sceneId);
     updateSplitSceneEndFrameStatus(sceneId, {
       endFrameStatus: 'idle',
       endFrameProgress: 0,
       endFrameError: '用户已取消',
     });
-    setIsGenerating(false);
     toast.info(`分镜 ${sceneId + 1} 尾帧生成已停止`);
   }, [updateSplitSceneEndFrameStatus]);
 
@@ -1482,12 +1488,14 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       console.log(`[SplitScenes] Using API key ${keyManager.getTotalKeyCount()} keys, current index available: ${keyManager.getAvailableKeyCount()}`);
     }
 
-    setIsGenerating(true);
-    setCurrentGeneratingId(sceneId);
+    if (videoAbortRef.current.has(sceneId)) {
+      toast.info(`分镜 ${sceneId + 1} 视频正在生成中`);
+      return;
+    }
 
-    // 创建本次视频生成的 AbortController，停止按钮可通过 videoAbortRef.current.abort() 取消
+    // 创建本次视频生成的 AbortController，停止按钮按 sceneId 取消对应任务
     const videoController = new AbortController();
-    videoAbortRef.current = videoController;
+    videoAbortRef.current.set(sceneId, videoController);
 
     try {
       // Reset and start
@@ -1531,8 +1539,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       
       if (!firstFrameUrl) {
         toast.error(`分镜 ${sceneId + 1} 没有首帧图片，请先生成图片`);
-        setIsGenerating(false);
-        setCurrentGeneratingId(null);
         return;
       }
       console.log('[SplitScenes] First frame source:', firstFrameUrl.startsWith('http') ? 'HTTP URL' : 'local/base64');
@@ -1733,18 +1739,12 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       } else {
         console.log('[SplitScenes] Skipping end frame extraction: needsEndFrame=', currentScene?.needsEndFrame, 'hasEndFrame=', !!currentScene?.endFrameImageUrl);
       }
-      
-      setIsGenerating(false);
-      setCurrentGeneratingId(null);
-
     } catch (error) {
       const err = error as Error;
 
       // 用户主动取消：abort() 触发的 AbortError 或自定义 '用户已取消'
       if (err.name === 'AbortError' || err.message === '用户已取消') {
         console.log(`[SplitScenes] Scene ${sceneId} video generation cancelled by user`);
-        setIsGenerating(false);
-        setCurrentGeneratingId(null);
         return;
       }
 
@@ -1771,10 +1771,11 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         });
         toast.error(`分镜 ${sceneId + 1} 生成失败: ${err.message}`);
       }
+    } finally {
+      if (videoAbortRef.current.get(sceneId) === videoController) {
+        videoAbortRef.current.delete(sceneId);
+      }
     }
-
-    setIsGenerating(false);
-    setCurrentGeneratingId(null);
   }, [splitScenes, storyboardConfig, getApiKey, updateSplitSceneVideo, autoSaveVideoToLibrary, buildEmotionDescription, getCharacterReferenceImages]);
 
   // Handle generate videos - serial processing based on concurrency
@@ -1832,7 +1833,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
     }
 
     setIsGenerating(false);
-    setCurrentGeneratingId(null);
     
     if (successCount === totalCount) {
       toast.success("所有视频生成完成！");
@@ -1882,10 +1882,14 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       return;
     }
 
-    setIsGenerating(true);
-    // 创建本次生成的 AbortController，停止按钮可通过 imageAbortRef.current.abort() 取消
+    if (imageAbortRef.current.has(sceneId)) {
+      toast.info(`分镜 ${sceneId + 1} 首帧正在生成中`);
+      return;
+    }
+
+    // 创建本次生成的 AbortController，停止按钮按 sceneId 取消对应任务
     const imageController = new AbortController();
-    imageAbortRef.current = imageController;
+    imageAbortRef.current.set(sceneId, imageController);
     const imageSignal = imageController.signal;
 
     try {
@@ -1985,7 +1989,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         updateSplitSceneImage(sceneId, persistResult.localPath, scene.width, scene.height, persistResult.httpUrl || undefined);
         autoSaveImageToLibrary(sceneId, persistResult.localPath);
         toast.success(`分镜 ${sceneId + 1} 图片生成完成，已保存到素材库`);
-        setIsGenerating(false);
         return;
       }
 
@@ -2015,10 +2018,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           });
 
           if (!statusResponse.ok) {
-            if (statusResponse.status === 404) {
-              throw new Error('任务不存在');
-            }
-            throw new Error(`Failed to check task status: ${statusResponse.status}`);
+            await throwUpstreamResponseError(statusResponse);
           }
 
           const statusData = await statusResponse.json();
@@ -2041,7 +2041,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
             updateSplitSceneImage(sceneId, persistResult.localPath, scene.width, scene.height, persistResult.httpUrl || undefined);
             autoSaveImageToLibrary(sceneId, persistResult.localPath);
             toast.success(`分镜 ${sceneId + 1} 图片生成完成，已保存到素材库`);
-            setIsGenerating(false);
             return;
           }
 
@@ -2066,7 +2065,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       // 用户主动取消：abort() 触发的 AbortError 或自定义 '用户已取消'
       if (err.name === 'AbortError' || err.message === '用户已取消') {
         console.log(`[SplitScenes] Scene ${sceneId} image generation cancelled by user`);
-        setIsGenerating(false);
         return;
       }
 
@@ -2077,9 +2075,11 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         imageError: err.message,
       });
       toast.error(`分镜 ${sceneId + 1} 图片生成失败: ${err.message}`);
+    } finally {
+      if (imageAbortRef.current.get(sceneId) === imageController) {
+        imageAbortRef.current.delete(sceneId);
+      }
     }
-
-    setIsGenerating(false);
   }, [
     splitScenes,
     storyboardConfig,
@@ -2914,7 +2914,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         const url = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
         url.searchParams.set('_ts', Date.now().toString());
         const statusResp = await corsFetch(url.toString(), { method: 'GET', headers: { 'Authorization': `Bearer ${apiKeyToUse}`, 'Cache-Control': 'no-cache' } });
-        if (!statusResp.ok) throw new Error(`Failed to check task status: ${statusResp.status}`);
+        if (!statusResp.ok) await throwUpstreamResponseError(statusResp);
         const statusData = await statusResp.json();
         const status = (statusData.status ?? statusData.data?.status ?? 'unknown').toString().toLowerCase();
         if (status === 'completed' || status === 'succeeded' || status === 'success') {
@@ -2981,11 +2981,14 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
     
     console.log('[EndFrame] Using config:', { platform, model, imageBaseUrl });
 
-    setIsGenerating(true);
+    if (endFrameAbortRef.current.has(sceneId)) {
+      toast.info(`分镜 ${sceneId + 1} 尾帧正在生成中`);
+      return;
+    }
 
-    // 创建本次尾帧生成的 AbortController，停止按钮可通过 endFrameAbortRef.current.abort() 取消
+    // 创建本次尾帧生成的 AbortController，停止按钮按 sceneId 取消对应任务
     const endFrameController = new AbortController();
-    endFrameAbortRef.current = endFrameController;
+    endFrameAbortRef.current.set(sceneId, endFrameController);
     const endFrameSignal = endFrameController.signal;
 
     try {
@@ -3090,7 +3093,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           projectId: mediaProjectId,
         });
         toast.success(`分镜 ${sceneId + 1} 尾帧生成完成，已保存到素材库`);
-        setIsGenerating(false);
         return;
       }
 
@@ -3118,8 +3120,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           });
 
           if (!statusResponse.ok) {
-            if (statusResponse.status === 404) throw new Error('任务不存在');
-            throw new Error(`Failed to check task status: ${statusResponse.status}`);
+            await throwUpstreamResponseError(statusResponse);
           }
 
           const statusData = await statusResponse.json();
@@ -3150,7 +3151,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
               projectId: mediaProjectId,
             });
             toast.success(`分镜 ${sceneId + 1} 尾帧生成完成，已保存到素材库`);
-            setIsGenerating(false);
             return;
           }
 
@@ -3174,7 +3174,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       // 用户主动取消：abort() 触发的 AbortError 或自定义 '用户已取消'
       if (err.name === 'AbortError' || err.message === '用户已取消') {
         console.log(`[SplitScenes] Scene ${sceneId} end frame generation cancelled by user`);
-        setIsGenerating(false);
         return;
       }
 
@@ -3185,9 +3184,11 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         endFrameError: err.message,
       });
       toast.error(`分镜 ${sceneId + 1} 尾帧生成失败: ${err.message}`);
+    } finally {
+      if (endFrameAbortRef.current.get(sceneId) === endFrameController) {
+        endFrameAbortRef.current.delete(sceneId);
+      }
     }
-
-    setIsGenerating(false);
   }, [
     splitScenes,
     storyboardConfig,
@@ -3478,7 +3479,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
             isExtractingFrame={isExtractingFrame}
             isAngleSwitching={isAngleSwitching}
             isQuadGridGenerating={isQuadGridGenerating}
-            isGeneratingAny={isGenerating}
+            isGeneratingAny={isSceneCardLocked(scene)}
           />
                 ))}
               </div>
@@ -3811,7 +3812,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
             isExtractingFrame={isExtractingFrame}
             isAngleSwitching={isAngleSwitching}
             isQuadGridGenerating={isQuadGridGenerating}
-            isGeneratingAny={isGenerating}
+            isGeneratingAny={isSceneCardLocked(scene)}
           />
         ))}
 

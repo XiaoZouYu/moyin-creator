@@ -898,7 +898,6 @@ async function callVolcVideoApi(
       throw createProviderError({
         mediaKind: 'video',
         stage: 'submit',
-        status: 503,
         provider: officialArk ? '火山方舟' : 'Volc 兼容中转',
         model,
         route: taskUrls.routeLabel,
@@ -1746,26 +1745,11 @@ export async function callJuxinVideoGenerationApi(
     if (!submitResponse.ok) {
       const errorText = await submitResponse.text();
       console.error('[VideoGen] Grok video error:', submitResponse.status, errorText);
-
-      if (keyManager?.handleError(submitResponse.status, errorText)) {
-        const nextKey = keyManager.getCurrentKey?.();
-        console.log(`[VideoGen] Grok: rotated to key ${nextKey?.substring(0, 8)}… (due to ${submitResponse.status})`);
-      }
-
-      let errorMessage = `Grok API failed: ${submitResponse.status}`;
-      try {
-        const errorJson = JSON.parse(errorText);
-        errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
-      } catch {
-        // Ignore JSON parse errors
-      }
-
-      if (submitResponse.status === 401 || submitResponse.status === 403) {
-        throw new Error('API Key 无效或已过期');
-      }
-      const err = new Error(errorMessage) as Error & { status?: number };
-      err.status = submitResponse.status;
-      throw err;
+      handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
+        provider: 'Grok',
+        model,
+        route: '/v1/video/create',
+      });
     }
 
     return submitResponse.json();

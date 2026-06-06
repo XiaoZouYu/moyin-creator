@@ -71,29 +71,6 @@ async function resolveImageUrl(src: string): Promise<string> {
   return mediaUrlToDataUrl(src);
 }
 
-function extractErrorMessage(status: number, errorText: string): string {
-  let message = `API 请求失败: ${status}`;
-
-  try {
-    const errorJson = JSON.parse(errorText);
-    message = errorJson.error?.message || errorJson.message || message;
-  } catch {
-    if (errorText && errorText.length < 200) {
-      message = errorText;
-    }
-  }
-
-  if (status === 401 || status === 403) {
-    return 'API Key 无效或已过期，请检查“图片理解”服务的 Key 配置';
-  }
-
-  if (status >= 500) {
-    return message || `上游服务暂时不可用 (${status})`;
-  }
-
-  return message;
-}
-
 function getMessageContent(data: any): string {
   const rawContent = data?.choices?.[0]?.message?.content;
   if (typeof rawContent === 'string') {
@@ -177,9 +154,7 @@ export async function extractStyleTokens(
       console.error('[StyleExtractor] API error:', resp.status, errorText);
       config.keyManager.handleError(resp.status, errorText);
 
-      const error = new Error(extractErrorMessage(resp.status, errorText)) as Error & {
-        status?: number;
-      };
+      const error = new Error(errorText.trim() || `HTTP ${resp.status}`) as Error & { status?: number };
       error.status = resp.status;
       throw error;
     }

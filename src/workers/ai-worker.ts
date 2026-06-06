@@ -200,11 +200,11 @@ async function handleGenerateScreenplay(command: GenerateScreenplayCommand): Pro
         mockMode,
       }),
     });
-    
+
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const errorMsg = errorData.message || errorData.error || `API request failed: ${response.status}`;
-      console.error('[AI Worker] Screenplay API error:', response.status, errorData);
+      const errorText = await response.text();
+      const errorMsg = errorText.trim() || `HTTP ${response.status}`;
+      console.error('[AI Worker] Screenplay API error:', response.status, errorText);
       throw new Error(errorMsg);
     }
     
@@ -261,11 +261,11 @@ async function generateImage(
       referenceImages: referenceImages && referenceImages.length > 0 ? referenceImages : undefined,
     }),
   });
-  
+
   if (!submitResponse.ok) {
-    const errorData = await submitResponse.json().catch(() => ({}));
-    const errorMsg = errorData.message || errorData.error || `Image API request failed: ${submitResponse.status}`;
-    console.error('[AI Worker] Image API error:', submitResponse.status, errorData);
+    const errorText = await submitResponse.text();
+    const errorMsg = errorText.trim() || `HTTP ${submitResponse.status}`;
+    console.error('[AI Worker] Image API error:', submitResponse.status, errorText);
     throw new Error(errorMsg);
   }
   
@@ -318,10 +318,10 @@ async function generateVideo(
       referenceImages: referenceImages && referenceImages.length > 0 ? referenceImages : undefined,
     }),
   });
-  
+
   if (!submitResponse.ok) {
-    const errorData = await submitResponse.json().catch(() => ({}));
-    throw new Error(errorData.error || `Video API request failed: ${submitResponse.status}`);
+    const errorText = await submitResponse.text();
+    throw new Error(errorText.trim() || `HTTP ${submitResponse.status}`);
   }
   
   const submitData: VideoAPIResponse = await submitResponse.json();

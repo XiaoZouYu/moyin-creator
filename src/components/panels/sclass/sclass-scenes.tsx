@@ -11,6 +11,7 @@
 import React, { useState, useCallback, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { corsFetch } from "@/lib/cors-fetch";
+import { throwUpstreamResponseError } from "@/lib/ai/provider-errors";
 import { Button } from "@/components/ui/button";
 import { 
   useDirectorStore, 
@@ -1325,7 +1326,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
               );
 
               if (!statusResponse.ok) {
-                throw new Error(`Failed to check task status: ${statusResponse.status}`);
+                await throwUpstreamResponseError(statusResponse);
               }
 
               const statusData = await statusResponse.json();
@@ -1843,10 +1844,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           });
 
           if (!statusResponse.ok) {
-            if (statusResponse.status === 404) {
-              throw new Error('任务不存在');
-            }
-            throw new Error(`Failed to check task status: ${statusResponse.status}`);
+            await throwUpstreamResponseError(statusResponse);
           }
 
           const statusData = await statusResponse.json();
@@ -2645,7 +2643,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         const url = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
         url.searchParams.set('_ts', Date.now().toString());
         const statusResp = await corsFetch(url.toString(), { method: 'GET', headers: { 'Authorization': `Bearer ${apiKeyToUse}`, 'Cache-Control': 'no-cache' } });
-        if (!statusResp.ok) throw new Error(`Failed to check task status: ${statusResp.status}`);
+        if (!statusResp.ok) await throwUpstreamResponseError(statusResp);
         const statusData = await statusResp.json();
         const status = (statusData.status ?? statusData.data?.status ?? 'unknown').toString().toLowerCase();
         if (status === 'completed' || status === 'succeeded' || status === 'success') {
@@ -2829,8 +2827,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           });
 
           if (!statusResponse.ok) {
-            if (statusResponse.status === 404) throw new Error('任务不存在');
-            throw new Error(`Failed to check task status: ${statusResponse.status}`);
+            await throwUpstreamResponseError(statusResponse);
           }
 
           const statusData = await statusResponse.json();

@@ -10,6 +10,7 @@ import type { Shot } from "@/types/script";
 import { corsFetch } from "@/lib/cors-fetch";
 import { retryOperation } from "@/lib/utils/retry";
 import { delay, RATE_LIMITS } from "@/lib/utils/rate-limiter";
+import { throwUpstreamResponseError } from "@/lib/ai/provider-errors";
 
 const buildEndpoint = (baseUrl: string, path: string) => {
   const normalized = baseUrl.replace(/\/+$/, '');
@@ -63,7 +64,7 @@ async function pollTaskStatus(
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to check task status: ${response.status}`);
+        await throwUpstreamResponseError(response);
       }
 
       const data = await response.json();
@@ -189,17 +190,7 @@ export async function generateShotImage(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      let errorMessage = `API error: ${response.status}`;
-      try {
-        const errorJson = JSON.parse(errorText);
-        errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
-      } catch {}
-      
-      // Create error with status code for retry logic
-      const error = new Error(errorMessage) as Error & { status?: number };
-      error.status = response.status;
-      throw error;
+      await throwUpstreamResponseError(response);
     }
 
     return response.json();
@@ -297,16 +288,7 @@ export async function generateShotVideo(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      let errorMessage = `API error: ${response.status}`;
-      try {
-        const errorJson = JSON.parse(errorText);
-        errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
-      } catch {}
-      
-      const error = new Error(errorMessage) as Error & { status?: number };
-      error.status = response.status;
-      throw error;
+      await throwUpstreamResponseError(response);
     }
 
     return response.json();

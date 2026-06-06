@@ -457,21 +457,9 @@ Return a RAW JSON array (no markdown code block). BILINGUAL output required.
     if (!response.ok) {
       const errorText = await response.text();
       console.error('[ScenePromptGenerator] API error:', response.status, errorText);
-      
-      let errorMessage = `API request failed: ${response.status}`;
-      try {
-        const errorJson = JSON.parse(errorText);
-        errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
-      } catch {
-        if (errorText && errorText.length < 200) {
-          errorMessage = errorText;
-        }
-      }
-      
-      if (response.status === 401 || response.status === 403) {
-        throw new Error('API Key 无效或已过期');
-      }
-      throw new Error(errorMessage);
+      const error = new Error(errorText.trim() || `HTTP ${response.status}`) as Error & { status?: number };
+      error.status = response.status;
+      throw error;
     }
 
     const data = await response.json();

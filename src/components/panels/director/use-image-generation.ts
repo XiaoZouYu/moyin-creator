@@ -4,6 +4,7 @@
 import { useCharacterLibraryStore } from "@/stores/character-library-store";
 import { getFeatureConfig } from "@/lib/ai/feature-router";
 import { corsFetch } from "@/lib/cors-fetch";
+import { throwUpstreamResponseError } from "@/lib/ai/provider-errors";
 import { imageUrlToBase64, submitGridImageRequest } from "@/lib/ai/image-generator";
 import { mediaUrlToDataUrl, prepareImageReferencesForApi } from "@/lib/media-url-resolver";
 import type { SplitScene, ShotSizeType } from "@/stores/director-store";
@@ -144,8 +145,7 @@ export async function callImageGenerationApi(
       });
 
       if (!statusResponse.ok) {
-        if (statusResponse.status === 404) throw new Error('任务不存在');
-        throw new Error(`Failed to check task status: ${statusResponse.status}`);
+        await throwUpstreamResponseError(statusResponse);
       }
 
       const statusData = await statusResponse.json();

@@ -910,23 +910,8 @@ async function generateViaKlingImagesEndpoint(
   return { url: imageUrl, taskId: data.task_id, mediaId };
 }
 
-function formatHttpErrorMessage(prefix: string, status: number, body: string): string {
-  try {
-    const data = JSON.parse(body);
-    const code = data.error?.code || data.code;
-    const message = data.error?.message || data.message || body;
-    const normalized = `${code || ''} ${message || ''}`.toLowerCase();
-
-    if (code === 'AccountOverdueError' || normalized.includes('overdue balance')) {
-      return `火山方舟账号欠费或余额不足（${status}${code ? ` ${code}` : ''}），请到火山方舟控制台充值或结清欠款后重试。`;
-    }
-    if (code === 'AuthenticationError' || status === 401) {
-      return `API Key 无效或未授权（${status}${code ? ` ${code}` : ''}）：${message}`;
-    }
-    return `${prefix}: ${status}${code ? ` ${code}` : ''} ${message}`;
-  } catch {
-    return `${prefix}: ${status} ${body}`;
-  }
+function formatHttpErrorMessage(_prefix: string, status: number, body: string): string {
+  return body.trim() || `HTTP ${status}`;
 }
 
 function toHttpError(prefix: string, status: number, body: string): Error & { status: number } {
