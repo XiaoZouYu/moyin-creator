@@ -34,6 +34,10 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 8088
+      CLOUD_STORAGE_DRIVER: ${CLOUD_STORAGE_DRIVER:-local}
+      CLOUD_STORAGE_DIR: ${CLOUD_STORAGE_DIR:-/app/.cache/cloud-storage}
+      CLOUD_MEDIA_DRIVER: ${CLOUD_MEDIA_DRIVER:-local}
+      CLOUD_MEDIA_DIR: ${CLOUD_MEDIA_DIR:-/app/.cache/cloud-media}
       GENERATION_TASK_STORE_DIR: ${GENERATION_TASK_STORE_DIR:-/app/.cache/generation-tasks}
       MAX_PROXY_BODY_BYTES: 52428800
       MAX_CLOUD_BODY_BYTES: ${MAX_CLOUD_BODY_BYTES:-209715200}

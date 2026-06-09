@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { lookup } from 'node:dns/promises'
 import net from 'node:net'
-import { resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import OSS from 'ali-oss'
 import pg from 'pg'
 
@@ -13,6 +14,8 @@ const MAX_CLOUD_BODY_BYTES = Number(process.env.MAX_CLOUD_BODY_BYTES || 200 * 10
 const MAX_MEDIA_INGEST_BYTES = Number(process.env.MAX_MEDIA_INGEST_BYTES || 500 * 1024 * 1024)
 const MEDIA_INGEST_TIMEOUT_MS = Number(process.env.MEDIA_INGEST_TIMEOUT_MS || 30_000)
 const CLOUD_UNAVAILABLE_RETRY_MS = Number(process.env.CLOUD_UNAVAILABLE_RETRY_MS || 30_000)
+const DEFAULT_LOCAL_CLOUD_STORAGE_DIR = join(process.cwd(), '.cache', 'cloud-storage')
+const DEFAULT_LOCAL_CLOUD_MEDIA_DIR = join(process.cwd(), '.cache', 'cloud-media')
 
 let dotenvLoaded = false
 let pool = null
@@ -171,6 +174,70 @@ function normalizeStorageKey(value) {
   if (key.length > 2048) throw new Error('Storage key is too long')
   if (key.includes('\0')) throw new Error('Invalid storage key')
   return key
+}
+
+function normalizeStoragePrefix(value) {
+  const key = String(value || '').trim().replace(/^\/+|\/+$/g, '')
+  if (key.length > 2048) throw new Error('Storage prefix is too long')
+  if (key.includes('\0')) throw new Error('Invalid storage prefix')
+  return key
+}
+
+function encodedLocalKey(key) {
+  return Buffer.from(normalizeStorageKey(key)).toString('base64url')
+}
+
+function localCloudStorageDir() {
+  return resolve(process.env.CLOUD_STORAGE_DIR || process.env.LOCAL_CLOUD_STORAGE_DIR || DEFAULT_LOCAL_CLOUD_STORAGE_DIR)
+}
+
+function localCloudMediaDir() {
+  return resolve(process.env.CLOUD_MEDIA_DIR || process.env.LOCAL_CLOUD_MEDIA_DIR || DEFAULT_LOCAL_CLOUD_MEDIA_DIR)
+}
+
+function cloudStorageDriver() {
+  const configured = String(process.env.CLOUD_STORAGE_DRIVER || '').trim().toLowerCase()
+  if (configured) return configured
+  return process.env.DATABASE_URL || process.env.POSTGRES_URL ? 'postgres' : 'local'
+}
+
+function cloudMediaDriver() {
+  const configured = String(process.env.CLOUD_MEDIA_DRIVER || '').trim().toLowerCase()
+  if (configured) return configured
+  return getOssClient() ? 'oss' : 'local'
+}
+
+function localStorageRecordPath(key) {
+  return join(localCloudStorageDir(), `${encodedLocalKey(key)}.json`)
+}
+
+function localMediaObjectPath(key) {
+  return join(localCloudMediaDir(), 'objects', encodedLocalKey(key))
+}
+
+function localMediaMetaPath(key) {
+  return join(localCloudMediaDir(), 'meta', `${encodedLocalKey(key)}.json`)
+}
+
+async function writeJsonAtomic(path, value) {
+  await mkdir(dirname(path), { recursive: true })
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`
+  await writeFile(tmpPath, JSON.stringify(value, null, 2))
+  await rename(tmpPath, path)
+}
+
+async function readJsonIfExists(path) {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function isObjectNotFoundError(error) {
+  return error?.code === 'ENOENT'
+    || /does not exist|NoSuchKey|not found|not exist/i.test(errorMessage(error))
 }
 
 function isPrivateIpv4(address) {
@@ -459,6 +526,234 @@ function listDirsFromKeys(keys, prefix) {
   return [...dirs]
 }
 
+async function listLocalStorageRecords() {
+  const dir = localCloudStorageDir()
+  await mkdir(dir, { recursive: true })
+  const entries = await readdir(dir).catch((error) => {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  })
+  const records = []
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) continue
+    const record = await readJsonIfExists(join(dir, entry))
+    if (record?.key) records.push(record)
+  }
+  return records
+}
+
+async function handleLocalCloudStorageRequest(req, res, requestUrl, action) {
+  if (action === 'status') {
+    sendJson(res, 200, {
+      enabled: true,
+      postgres: false,
+      driver: 'local',
+      dir: localCloudStorageDir(),
+    })
+    return
+  }
+
+  if (action === 'item' && req.method === 'GET') {
+    const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+    const record = await readJsonIfExists(localStorageRecordPath(key))
+    sendJson(res, 200, { value: record?.value ?? null })
+    return
+  }
+
+  if (action === 'item' && (req.method === 'POST' || req.method === 'PUT')) {
+    const body = await readJsonBody(req)
+    const key = normalizeStorageKey(body.key)
+    const now = new Date().toISOString()
+    const existing = await readJsonIfExists(localStorageRecordPath(key))
+    const value = typeof body.value === 'string' ? body.value : JSON.stringify(body.value ?? null)
+    await writeJsonAtomic(localStorageRecordPath(key), {
+      key,
+      userSegment: getUserSegmentFromKey(key),
+      value,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    })
+    sendJson(res, 200, { success: true })
+    return
+  }
+
+  if (action === 'item' && req.method === 'DELETE') {
+    const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+    await rm(localStorageRecordPath(key), { force: true })
+    sendJson(res, 200, { success: true })
+    return
+  }
+
+  if (action === 'exists' && req.method === 'GET') {
+    const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+    sendJson(res, 200, { exists: !!await readJsonIfExists(localStorageRecordPath(key)) })
+    return
+  }
+
+  if (action === 'keys' && req.method === 'GET') {
+    const prefix = normalizeStoragePrefix(requestUrl.searchParams.get('prefix') || '')
+    const start = prefix ? `${prefix}/` : ''
+    const records = await listLocalStorageRecords()
+    sendJson(res, 200, {
+      keys: records
+        .map((record) => record.key)
+        .filter((key) => !prefix || key === prefix || key.startsWith(start))
+        .sort(),
+    })
+    return
+  }
+
+  if (action === 'dirs' && req.method === 'GET') {
+    const prefix = normalizeStoragePrefix(requestUrl.searchParams.get('prefix') || '')
+    const records = await listLocalStorageRecords()
+    sendJson(res, 200, { dirs: listDirsFromKeys(records.map((record) => record.key).sort(), prefix) })
+    return
+  }
+
+  if (action === 'dir' && req.method === 'DELETE') {
+    const prefix = normalizeStorageKey(requestUrl.searchParams.get('prefix'))
+    const start = `${prefix}/`
+    const records = await listLocalStorageRecords()
+    await Promise.all(records
+      .filter((record) => record.key === prefix || record.key.startsWith(start))
+      .map((record) => rm(localStorageRecordPath(record.key), { force: true })))
+    sendJson(res, 200, { success: true })
+    return
+  }
+
+  sendJson(res, 404, { error: 'Unknown local cloud storage endpoint' })
+}
+
+async function writeLocalMedia(key, content, mimeType, sourceUrl = '') {
+  const normalizedKey = normalizeStorageKey(key)
+  const objectPath = localMediaObjectPath(normalizedKey)
+  const metaPath = localMediaMetaPath(normalizedKey)
+  await mkdir(dirname(objectPath), { recursive: true })
+  await mkdir(dirname(metaPath), { recursive: true })
+  await writeFile(objectPath, content)
+  await writeJsonAtomic(metaPath, {
+    key: normalizedKey,
+    mimeType: mimeType || 'application/octet-stream',
+    size: content.length,
+    sourceUrl,
+    updatedAt: new Date().toISOString(),
+  })
+}
+
+async function readLocalMedia(key) {
+  const normalizedKey = normalizeStorageKey(key)
+  const meta = await readJsonIfExists(localMediaMetaPath(normalizedKey))
+  if (!meta) return null
+  try {
+    const content = await readFile(localMediaObjectPath(normalizedKey))
+    return {
+      key: normalizedKey,
+      content,
+      mimeType: meta.mimeType || 'application/octet-stream',
+      size: meta.size || content.length,
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+async function handleLocalCloudMediaRequest(req, res, requestUrl, action) {
+  if (action === 'status') {
+    sendJson(res, 200, {
+      enabled: true,
+      oss: false,
+      driver: 'local',
+      dir: localCloudMediaDir(),
+    })
+    return
+  }
+
+  if (action === 'item' && (req.method === 'POST' || req.method === 'PUT')) {
+    const body = await readJsonBody(req)
+    const key = normalizeStorageKey(body.key)
+    const mimeType = String(body.mimeType || 'application/octet-stream')
+    const dataBase64 = String(body.dataBase64 || '')
+    if (!dataBase64) throw new Error('Missing dataBase64')
+    const payload = Buffer.from(dataBase64.includes(',') ? dataBase64.slice(dataBase64.indexOf(',') + 1) : dataBase64, 'base64')
+    await writeLocalMedia(key, payload, mimeType)
+    sendJson(res, 200, {
+      success: true,
+      key,
+      url: cloudMediaFileUrl(req, key),
+      mimeType,
+      size: payload.length,
+    })
+    return
+  }
+
+  if (action === 'ingest' && (req.method === 'POST' || req.method === 'PUT')) {
+    const body = await readJsonBody(req)
+    const key = normalizeStorageKey(body.key)
+    const sourceUrl = String(body.url || '').trim()
+    if (!sourceUrl) throw new Error('Missing media ingest url')
+    const expectedKind = String(body.expectedKind || 'media').toLowerCase()
+    const fetched = await fetchIngestMedia(sourceUrl, expectedKind)
+    await writeLocalMedia(key, fetched.content, fetched.mimeType, fetched.sourceUrl)
+    sendJson(res, 200, {
+      success: true,
+      key,
+      mimeType: fetched.mimeType,
+      size: fetched.content.length,
+      sourceUrl: fetched.sourceUrl,
+      url: cloudMediaFileUrl(req, key),
+    })
+    return
+  }
+
+  if (action === 'url' && req.method === 'GET') {
+    const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+    const media = await readLocalMedia(key)
+    sendJson(res, 200, { url: media ? cloudMediaFileUrl(req, key) : null, exists: !!media })
+    return
+  }
+
+  if (action === 'file' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+    const media = await readLocalMedia(key)
+    if (!media) {
+      sendJson(res, 404, { error: 'Cloud media key not found', key })
+      return
+    }
+    sendBinary(res, 200, req.method === 'HEAD' ? Buffer.alloc(0) : media.content, {
+      'content-type': media.mimeType,
+      'content-length': String(req.method === 'HEAD' ? 0 : media.content.length),
+    })
+    return
+  }
+
+  if (action === 'base64' && req.method === 'GET') {
+    const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+    const media = await readLocalMedia(key)
+    if (!media) {
+      sendJson(res, 200, { base64: null, exists: false, key })
+      return
+    }
+    sendJson(res, 200, {
+      base64: `data:${media.mimeType};base64,${media.content.toString('base64')}`,
+      mimeType: media.mimeType,
+      size: media.content.length,
+      exists: true,
+    })
+    return
+  }
+
+  if (action === 'item' && req.method === 'DELETE') {
+    const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+    await rm(localMediaObjectPath(key), { force: true })
+    await rm(localMediaMetaPath(key), { force: true })
+    sendJson(res, 200, { success: true })
+    return
+  }
+
+  sendJson(res, 404, { error: 'Unknown local cloud media endpoint' })
+}
+
 export async function handleCloudStorageRequest(req, res) {
   if (req.method === 'OPTIONS') {
     sendJson(res, 204, {})
@@ -472,6 +767,11 @@ export async function handleCloudStorageRequest(req, res) {
   const action = storagePath || 'status'
 
   try {
+    if (cloudStorageDriver() === 'local') {
+      await handleLocalCloudStorageRequest(req, res, requestUrl, action)
+      return
+    }
+
     if (action === 'status') {
       try {
         await ensureSchema()
@@ -590,6 +890,11 @@ export async function handleCloudMediaRequest(req, res) {
   const action = mediaPath || 'status'
 
   try {
+    if (cloudMediaDriver() === 'local') {
+      await handleLocalCloudMediaRequest(req, res, requestUrl, action)
+      return
+    }
+
     if (action === 'status') {
       let enabled = false
       let detail = ''
@@ -721,6 +1026,24 @@ export async function handleCloudMediaRequest(req, res) {
 
     sendJson(res, 404, { error: 'Unknown cloud media endpoint' })
   } catch (error) {
+    if (isObjectNotFoundError(error)) {
+      if (action === 'base64' && req.method === 'GET') {
+        sendJson(res, 200, {
+          base64: null,
+          exists: false,
+          key: requestUrl.searchParams.get('key') || '',
+        })
+        return
+      }
+      if (action === 'url' && req.method === 'GET') {
+        sendJson(res, 200, { url: null, exists: false })
+        return
+      }
+      if (action === 'item' && req.method === 'DELETE') {
+        sendJson(res, 200, { success: true })
+        return
+      }
+    }
     const status = httpStatusForError(error)
     if (status === 503) markOssUnavailable(error)
     logRequestFailure('cloud-media', error, status)
