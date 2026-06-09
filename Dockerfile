@@ -16,6 +16,7 @@ ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=8088
 ENV DIST_DIR=/app/dist
+ENV GENERATION_TASK_STORE_DIR=/app/.cache/generation-tasks
 
 WORKDIR /app
 
@@ -24,6 +25,8 @@ RUN npm ci --omit=dev
 
 COPY --from=builder --chown=node:node /app/dist ./dist
 COPY --from=builder --chown=node:node /app/scripts ./scripts
+
+RUN mkdir -p /app/.cache/generation-tasks && chown -R node:node /app/.cache
 
 USER node
 

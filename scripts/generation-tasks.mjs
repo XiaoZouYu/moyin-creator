@@ -17,7 +17,8 @@ const SUBMIT_TIMEOUT_MS = Number(process.env.GENERATION_TASK_SUBMIT_TIMEOUT_MS |
 const POLL_REQUEST_TIMEOUT_MS = Number(process.env.GENERATION_TASK_POLL_REQUEST_TIMEOUT_MS || 60_000)
 const MEDIA_FETCH_TIMEOUT_MS = Number(process.env.GENERATION_TASK_MEDIA_FETCH_TIMEOUT_MS || 120_000)
 const TASK_RETENTION_MS = Number(process.env.GENERATION_TASK_RETENTION_MS || 60 * 60 * 1000)
-const TASK_STORE_DIR = resolve(process.env.GENERATION_TASK_STORE_DIR || join(process.cwd(), '.cache', 'generation-tasks'))
+const DEFAULT_TASK_STORE_DIR = join(process.cwd(), '.cache', 'generation-tasks')
+const TASK_STORE_DIR = resolve(process.env.GENERATION_TASK_STORE_DIR || DEFAULT_TASK_STORE_DIR)
 const TASK_MEDIA_DIR = join(TASK_STORE_DIR, 'media')
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'timeout'])
 
