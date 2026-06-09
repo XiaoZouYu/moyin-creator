@@ -113,12 +113,14 @@ export async function createBackendGenerationTask(
   input: BackendGenerationTaskInput,
 ): Promise<BackendGenerationTaskSnapshot> {
   try {
+    const timeoutMs = input.timeoutMs ?? getBackendPollingTimeoutMs();
     const response = await corsFetch('/__generation_tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        timeoutMs: getBackendPollingTimeoutMs(),
         ...input,
+        timeoutMs,
+        submitTimeoutMs: input.submitTimeoutMs ?? timeoutMs,
       }),
     });
     return readTaskResponse(response, '后端生成任务创建');
