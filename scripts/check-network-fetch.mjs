@@ -8,8 +8,6 @@ const allowedFiles = new Set([
   'src/lib/cors-fetch.ts',
   'src/lib/web-platform.ts',
   'src/lib/media-source.ts',
-  'src/app/api/ai/runninghub-test/route.ts',
-  'src/app/api/proxy-image/route.ts',
 ]);
 
 function isSourceFile(path) {

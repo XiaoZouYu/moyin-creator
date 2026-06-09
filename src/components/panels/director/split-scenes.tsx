@@ -68,7 +68,7 @@ import { getFeatureConfig, getFeatureNotConfiguredMessage } from "@/lib/ai/featu
 import { submitGridImageRequest } from "@/lib/ai/image-generator";
 import { isImageHostConfigured } from "@/lib/image-host";
 import { saveVideoToLocal } from '@/lib/image-storage';
-import { mediaUrlToDataUrl, prepareImageReferencesForApi, resolveImageToHttpUrl } from '@/lib/media-url-resolver';
+import { isDiscouragedExternalImageUrl, mediaUrlToDataUrl, prepareImageReferencesForApi, resolveImageToHttpUrl } from '@/lib/media-url-resolver';
 import { callVideoGenerationApi, extractLastFrameFromVideo, isContentModerationError } from './use-video-generation';
 import { persistSceneImage } from '@/lib/utils/image-persist';
 import {
@@ -116,18 +116,12 @@ const isLocalImageSource = (value?: string | null): value is string => {
   return typeof value === 'string' && value.length > 0 && !isHttpImageUrl(value);
 };
 
-const isDiscouragedExternalImageUrl = (value?: string | null): boolean => {
-  if (!isHttpImageUrl(value)) return false;
-  try {
-    const hostname = new URL(value ?? '').hostname.toLowerCase();
-    return hostname === 'bmp.ovh' || hostname.endsWith('.bmp.ovh');
-  } catch {
-    return false;
-  }
-};
-
 const shouldRefreshImageViaCurrentHost = (localUrl?: string | null): boolean => {
-  return isLocalImageSource(localUrl) && useAPIConfigStore.getState().isImageHostConfigured();
+  return isLocalImageSource(localUrl)
+    && (
+      useAPIConfigStore.getState().isImageHostConfigured()
+      || (typeof window !== 'undefined' && !!window.imageStorage?.getPublicUrl)
+    );
 };
 
 type ReferenceBucketKind = 'anchor' | 'character' | 'scene' | 'style';

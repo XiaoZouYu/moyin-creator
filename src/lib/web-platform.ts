@@ -1,4 +1,5 @@
 import packageJson from '../../package.json'
+import { corsFetch } from './cors-fetch'
 
 const DB_NAME = 'santi-creator-web-platform'
 const DB_VERSION = 1
@@ -142,13 +143,20 @@ function parseLocalMediaUrl(value: string): { key: string; category: string; fil
   }
 }
 
+function toLocalMediaUrl(category: string, filename: string): string {
+  return `local-image://${encodeURIComponent(category)}/${encodeURIComponent(filename)}`
+}
+
 function safeFilename(filename: string): string {
   const fallback = `asset-${Date.now()}.png`
   const base = decodeURIComponent(filename || fallback)
     .split(/[\\/]/)
     .pop()
     ?.trim() || fallback
-  return base.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  const invalid = new Set(['<', '>', ':', '"', '/', '\\', '|', '?', '*'])
+  return Array.from(base)
+    .map((char) => invalid.has(char) || char.charCodeAt(0) < 32 ? '_' : char)
+    .join('')
 }
 
 function extensionForMimeType(mimeType: string): string {
@@ -182,53 +190,6 @@ function isHttpUrl(value: string): boolean {
   return value.startsWith('http://') || value.startsWith('https://')
 }
 
-function shouldProxyUrl(targetUrl: string): boolean {
-  if (!isHttpUrl(targetUrl)) return false
-  const configuredProxy = import.meta.env.VITE_WEB_API_PROXY_URL
-  if (configuredProxy) return true
-  try {
-    return new URL(targetUrl).origin !== window.location.origin
-  } catch {
-    return false
-  }
-}
-
-function buildProxyUrl(targetUrl: string): string {
-  const configuredProxy = import.meta.env.VITE_WEB_API_PROXY_URL
-  if (configuredProxy) {
-    const proxyUrl = new URL(configuredProxy, window.location.origin)
-    proxyUrl.searchParams.set('url', targetUrl)
-    return proxyUrl.toString()
-  }
-  return `/__api_proxy?url=${encodeURIComponent(targetUrl)}`
-}
-
-function summarizeFetchTarget(targetUrl: string): string {
-  try {
-    const url = new URL(targetUrl)
-    return `${url.origin}${url.pathname}`
-  } catch {
-    return targetUrl.slice(0, 120)
-  }
-}
-
-function getRequestMethod(init?: RequestInit): string {
-  return (init?.method || 'GET').toUpperCase()
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError'
-    || error instanceof Error && error.name === 'AbortError'
-}
-
-function getFriendlyFetchFailure(error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error)
-  if (/^failed to fetch$/i.test(detail) || /^load failed$/i.test(detail) || /networkerror/i.test(detail)) {
-    return '浏览器网络层无法连通目标地址，常见原因是代理服务不可用、目标服务不可达、CORS/预检失败或浏览器拦截。'
-  }
-  return detail || '未知网络错误'
-}
-
 function headersToRecord(headers?: HeadersInit): Record<string, string> {
   const record: Record<string, string> = {}
   new Headers(headers).forEach((value, key) => {
@@ -245,100 +206,8 @@ function responseHeadersToRecord(headers: Headers): Record<string, string> {
   return record
 }
 
-async function serializeFormData(formData: FormData): Promise<Array<{
-  name: string
-  value?: string
-  fileName?: string
-  mimeType?: string
-  dataBase64?: string
-}>> {
-  const fields: Array<{
-    name: string
-    value?: string
-    fileName?: string
-    mimeType?: string
-    dataBase64?: string
-  }> = []
-
-  for (const [name, value] of formData.entries()) {
-    if (typeof value === 'string') {
-      fields.push({ name, value })
-      continue
-    }
-
-    fields.push({
-      name,
-      fileName: value instanceof File ? value.name : 'upload.bin',
-      mimeType: value.type || 'application/octet-stream',
-      dataBase64: arrayBufferToBase64(await value.arrayBuffer()),
-    })
-  }
-
-  return fields
-}
-
-function removeContentType(headers: Record<string, string>): Record<string, string> {
-  const result = { ...headers }
-  for (const key of Object.keys(result)) {
-    if (key.toLowerCase() === 'content-type') {
-      delete result[key]
-    }
-  }
-  return result
-}
-
 async function webFetch(targetUrl: string, init?: RequestInit): Promise<Response> {
-  if (!shouldProxyUrl(targetUrl)) {
-    try {
-      return await fetch(targetUrl, init)
-    } catch (error) {
-      if (isAbortError(error)) throw error
-      throw new Error(`网络请求失败：${getRequestMethod(init)} ${summarizeFetchTarget(targetUrl)}。${getFriendlyFetchFailure(error)}`)
-    }
-  }
-
-  let originalHeaders = headersToRecord(init?.headers)
-  const headers: Record<string, string> = {
-  }
-  let proxyBody = init?.body
-  if (init?.body instanceof FormData) {
-    originalHeaders = removeContentType(originalHeaders)
-    headers['x-proxy-form-data'] = '1'
-    headers['content-type'] = 'application/json'
-    proxyBody = JSON.stringify(await serializeFormData(init.body))
-  }
-  headers['x-proxy-headers'] = JSON.stringify(originalHeaders)
-
-  const proxyUrl = buildProxyUrl(targetUrl)
-  let response: Response
-  try {
-    response = await fetch(proxyUrl, {
-      ...init,
-      headers,
-      body: proxyBody,
-    })
-  } catch (error) {
-    if (isAbortError(error)) throw error
-    const configuredProxy = import.meta.env.VITE_WEB_API_PROXY_URL
-    const target = `${getRequestMethod(init)} ${summarizeFetchTarget(targetUrl)}`
-    const reason = getFriendlyFetchFailure(error)
-    throw new Error(
-      configuredProxy
-        ? `跨域代理请求失败：${target}。代理 ${summarizeFetchTarget(proxyUrl)} 不可用或未正确允许 CORS/OPTIONS。${reason}`
-        : `跨域代理 /__api_proxy 请求失败：${target}。请确认正式环境使用 scripts/web-server.mjs/Docker 服务，或配置 VITE_WEB_API_PROXY_URL。${reason}`,
-    )
-  }
-
-  const configuredProxy = import.meta.env.VITE_WEB_API_PROXY_URL
-  const contentType = response.headers.get('content-type') || ''
-  if (!configuredProxy && response.status === 404 && contentType.includes('text/html')) {
-    throw new Error('Web API proxy /__api_proxy 不可用；请使用 npm run dev:web / preview:web，或在部署环境配置 VITE_WEB_API_PROXY_URL')
-  }
-  if (!configuredProxy && response.ok && contentType.includes('text/html')) {
-    throw new Error('Web API proxy /__api_proxy 返回了 HTML，说明当前静态服务器没有代理接口；请配置 VITE_WEB_API_PROXY_URL 或后端反向代理')
-  }
-
-  return response
+  return corsFetch(targetUrl, init)
 }
 
 let cloudStorageUnavailableUntil = 0
@@ -411,7 +280,7 @@ async function ensureCloudEndpointAvailable(isMedia: boolean): Promise<void> {
   await cloudStorageProbePromise
 }
 
-async function fetchCloudJson<T = any>(
+async function fetchCloudJson<T = unknown>(
   path: string,
   init?: RequestInit,
   options?: { media?: boolean },
@@ -693,7 +562,7 @@ async function apiFetch(options: Parameters<NonNullable<Window['electronAPI']>['
   }
 }
 
-function resolveUploadUrl(provider: any): string {
+function resolveUploadUrl(provider: { uploadPath?: string; baseUrl?: string }): string {
   const uploadPath = String(provider.uploadPath || '').trim()
   if (isHttpUrl(uploadPath)) return uploadPath
   const baseUrl = String(provider.baseUrl || '').trim().replace(/\/*$/, '')
@@ -817,18 +686,26 @@ function installImageStorage() {
         }
 
         const blob = await sourceToBlob(url)
-        await assertImageUploadBlob(blob)
+        const mediaCategory = category.toLowerCase()
+        if (!mediaCategory.includes('video') && !mediaCategory.includes('audio')) {
+          await assertImageUploadBlob(blob)
+        }
         const safeName = ensureExtension(safeFilename(filename), blob.type || 'application/octet-stream')
         const key = `${category}/${safeName}`
+        await setMedia({
+          key,
+          category,
+          filename: safeName,
+          blob,
+          mimeType: blob.type || 'application/octet-stream',
+          size: blob.size,
+          createdAt: Date.now(),
+        }).catch(() => undefined)
         const saved = await cloudMediaSave(key, blob)
         if (!saved.success) {
           throw new Error('OSS media upload failed')
         }
-        const cloudUrl = saved.url || await cloudMediaUrl(key)
-        if (!cloudUrl) {
-          throw new Error('OSS media upload succeeded but no URL was returned')
-        }
-        return { success: true, localPath: cloudUrl }
+        return { success: true, localPath: toLocalMediaUrl(category, safeName) }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : String(error) }
       }
@@ -849,6 +726,11 @@ function installImageStorage() {
       } catch {
         return null
       }
+    },
+    getPublicUrl: async (localPath) => {
+      const local = parseLocalMediaUrl(localPath)
+      if (!local) return isHttpUrl(localPath) ? localPath : null
+      return cloudMediaUrl(local.key)
     },
     deleteImage: async (localPath) => {
       const local = parseLocalMediaUrl(localPath)

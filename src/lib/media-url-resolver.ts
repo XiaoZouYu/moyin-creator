@@ -10,6 +10,7 @@
  */
 
 import { isImageHostConfigured, uploadToImageHost } from '@/lib/image-host';
+import { getUserScopedMediaCategory } from '@/lib/user-session';
 export {
   blobToDataUrl,
   dataUrlToBlob,
@@ -33,11 +34,29 @@ import {
 export function isDiscouragedExternalImageUrl(value?: string | null): boolean {
   if (typeof value !== 'string' || !isHttpMediaUrl(value)) return false;
   try {
-    const hostname = new URL(value).hostname.toLowerCase();
-    return hostname === 'bmp.ovh' || hostname.endsWith('.bmp.ovh');
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.toLowerCase();
+    const params = [...parsed.searchParams.keys()].map((key) => key.toLowerCase());
+    const hasOssSignature = ['ossaccesskeyid', 'expires', 'signature', 'x-oss-signature'].some((key) => params.includes(key));
+    return hostname === 'bmp.ovh'
+      || hostname.endsWith('.bmp.ovh')
+      || (hostname.endsWith('.aliyuncs.com') && hasOssSignature);
   } catch {
     return false;
   }
+}
+
+async function resolvePlatformPublicImageUrl(source: string): Promise<string | null> {
+  if (typeof window === 'undefined' || !source.startsWith('local-image://')) return null;
+  const publicUrl = await window.imageStorage?.getPublicUrl?.(source);
+  return publicUrl && isHttpMediaUrl(publicUrl) ? publicUrl : null;
+}
+
+function canResolvePlatformPublicImageUrl(source?: string | null): boolean {
+  return typeof window !== 'undefined'
+    && !!window.imageStorage?.getPublicUrl
+    && typeof source === 'string'
+    && source.startsWith('local-image://');
 }
 
 async function ensureDataUrlMinDimension(dataUrl: string, minDimension?: number): Promise<string> {
@@ -227,8 +246,14 @@ export async function resolveImageToHttpUrl(
     return '';
   }
 
+  if (url.startsWith('local-image://')) {
+    const publicUrl = await resolvePlatformPublicImageUrl(url);
+    if (publicUrl) return publicUrl;
+  }
+
   if (isHttpMediaUrl(url)) {
-    const canRefreshFromLocal = isLocalMediaSource(localFallback) && isImageHostConfigured();
+    const canRefreshFromLocal = isLocalMediaSource(localFallback)
+      && (isImageHostConfigured() || canResolvePlatformPublicImageUrl(localFallback));
     if (canRefreshFromLocal && (options.forceReuploadHttp || options.preferLocalFallback !== false || isDiscouragedExternalImageUrl(url))) {
       console.log(`[${logPrefix}] ${label}: re-uploading local fallback instead of reusing external URL`);
       return resolveImageToHttpUrl(localFallback, {
@@ -250,6 +275,18 @@ export async function resolveImageToHttpUrl(
       console.warn(`[${logPrefix}] ${label}: using external URL without local fallback:`, url.substring(0, 80));
     }
     return url;
+  }
+
+  if (typeof window !== 'undefined' && (isDataUrl(url) || isBlobUrl(url))) {
+    const saved = await window.imageStorage?.saveImage?.(
+      url,
+      getUserScopedMediaCategory('shots'),
+      options.uploadName?.trim() || `media_ref_${Date.now()}.png`,
+    );
+    if (saved?.success && saved.localPath) {
+      const publicUrl = await resolvePlatformPublicImageUrl(saved.localPath);
+      if (publicUrl) return publicUrl;
+    }
   }
 
   if (!isImageHostConfigured()) {

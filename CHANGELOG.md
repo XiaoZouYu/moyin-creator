@@ -61,4 +61,4 @@
 - 五大板块：剧本 → 角色 → 场景 → 导演 → S级
 - 多供应商 AI 调度 + API Key 轮询
 - Seedance 2.0 集成
-- Electron + React + TypeScript 技术栈
+- Vite Web + React + TypeScript 技术栈

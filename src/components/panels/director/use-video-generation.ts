@@ -1503,7 +1503,9 @@ export async function extractLastFrameFromVideo(
   seekOffset: number = 0.1
 ): Promise<string | null> {
   // local-image:// 由平台媒体适配器解析，不需要转换为 file://。
-  const resolvedUrl = videoUrl;
+  const resolvedUrl = videoUrl.startsWith('local-image://')
+    ? await window.imageStorage?.getImagePath(videoUrl) || videoUrl
+    : videoUrl;
   console.log('[VideoGen] Loading video for frame extraction:', resolvedUrl);
   
   return new Promise((resolve) => {

@@ -38,13 +38,19 @@ async function saveImageForPersistence(
       throw new Error('OSS 媒体上传失败：Web 图片存储接口未初始化');
     }
     const result = await window.imageStorage.saveImage(imageData, getUserScopedMediaCategory(category), filename);
-    if (!result.success || !result.localPath || !isHttpUrl(result.localPath)) {
+    if (!result.success || !result.localPath) {
       throw new Error(result.error || 'OSS 媒体上传失败：Web 端不能保存浏览器本地图片，请检查生产环境 __cloud_media/OSS 配置');
     }
     return result.localPath;
   }
 
   return saveImageToLocal(imageData, category, filename);
+}
+
+async function resolvePublicUrlForPersistence(localPath: string): Promise<string | null> {
+  if (isHttpUrl(localPath)) return localPath;
+  const publicUrl = await window.imageStorage?.getPublicUrl?.(localPath);
+  return publicUrl && isHttpUrl(publicUrl) ? publicUrl : null;
 }
 
 /**
@@ -85,7 +91,11 @@ export async function persistSceneImage(
   const localPath = await saveImageForPersistence(imageData, category, filename);
 
   if (strictCloudMedia) {
-    return { localPath, httpUrl: localPath };
+    const httpUrl = await resolvePublicUrlForPersistence(localPath);
+    if (!httpUrl) {
+      throw new Error('OSS 媒体上传成功但无法生成公网访问地址，请检查生产环境 __cloud_media/file 代理配置');
+    }
+    return { localPath, httpUrl };
   }
 
   // Optionally upload local images to an image host for API reuse.
@@ -132,7 +142,11 @@ export async function persistReferenceImage(
   const localPath = await saveImageForPersistence(imageData, category, filename);
 
   if (strictCloudMedia) {
-    return { localPath, httpUrl: localPath };
+    const httpUrl = await resolvePublicUrlForPersistence(localPath);
+    if (!httpUrl) {
+      throw new Error('OSS 媒体上传成功但无法生成公网访问地址，请检查生产环境 __cloud_media/file 代理配置');
+    }
+    return { localPath, httpUrl };
   }
 
   let httpUrl: string | null = null;

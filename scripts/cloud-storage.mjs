@@ -54,6 +54,22 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body))
 }
 
+function sendBinary(res, status, body, headers = {}) {
+  res.writeHead(status, {
+    'cache-control': 'public, max-age=31536000, immutable',
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+    'access-control-allow-headers': '*',
+    'x-content-type-options': 'nosniff',
+    ...headers,
+  })
+  if (status === 204 || headers['content-length'] === '0') {
+    res.end()
+    return
+  }
+  res.end(body)
+}
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
 }
@@ -247,6 +263,18 @@ function publicOssUrl(objectKey) {
   const region = process.env.ALI_OSS_REGION || process.env.OSS_REGION || 'oss-cn-chengdu'
   if (!bucket || !region) return null
   return `https://${bucket}.${region}.aliyuncs.com/${objectKey.split('/').map(encodeURIComponent).join('/')}`
+}
+
+function requestOrigin(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim()
+  const proto = forwardedProto || (req.socket?.encrypted ? 'https' : 'http')
+  const host = forwardedHost || req.headers.host || 'localhost'
+  return `${proto}://${host}`
+}
+
+function cloudMediaFileUrl(req, key) {
+  return `${requestOrigin(req)}/__cloud_media/file?key=${encodeURIComponent(normalizeStorageKey(key))}`
 }
 
 function contentTypeFromObject(result, fallback = 'application/octet-stream') {
@@ -445,12 +473,11 @@ export async function handleCloudMediaRequest(req, res) {
         },
       })
       const publicUrl = publicOssUrl(objectKey)
-      const expires = Number(process.env.ALI_OSS_SIGNED_URL_EXPIRES || process.env.OSS_SIGNED_URL_EXPIRES || 24 * 60 * 60)
       sendJson(res, 200, {
         success: true,
         key,
         objectKey,
-        url: publicUrl || client.signatureUrl(objectKey, { expires, method: 'GET' }),
+        url: publicUrl || cloudMediaFileUrl(req, key),
       })
       return
     }
@@ -463,9 +490,18 @@ export async function handleCloudMediaRequest(req, res) {
         sendJson(res, 200, { url: publicUrl })
         return
       }
-      const expires = Number(process.env.ALI_OSS_SIGNED_URL_EXPIRES || process.env.OSS_SIGNED_URL_EXPIRES || 24 * 60 * 60)
-      const url = client.signatureUrl(objectKey, { expires, method: 'GET' })
-      sendJson(res, 200, { url })
+      sendJson(res, 200, { url: cloudMediaFileUrl(req, key) })
+      return
+    }
+
+    if (action === 'file' && (req.method === 'GET' || req.method === 'HEAD')) {
+      const key = normalizeStorageKey(requestUrl.searchParams.get('key'))
+      const result = await client.get(ossObjectKey(key))
+      const content = Buffer.isBuffer(result.content) ? result.content : Buffer.from(result.content)
+      sendBinary(res, 200, req.method === 'HEAD' ? Buffer.alloc(0) : content, {
+        'content-type': contentTypeFromObject(result),
+        'content-length': String(req.method === 'HEAD' ? 0 : content.length),
+      })
       return
     }
 

@@ -15,6 +15,7 @@ declare global {
     imageStorage?: {
       saveImage: (url: string, category: string, filename: string) => Promise<{ success: boolean; localPath?: string; error?: string }>;
       getImagePath: (localPath: string) => Promise<string | null>;
+      getPublicUrl?: (localPath: string) => Promise<string | null>;
       deleteImage: (localPath: string) => Promise<boolean>;
       readAsBase64: (localPath: string) => Promise<{ success: boolean; base64?: string; mimeType?: string; size?: number; error?: string }>;
       getAbsolutePath: (localPath: string) => Promise<string | null>;
