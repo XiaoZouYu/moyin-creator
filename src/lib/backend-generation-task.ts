@@ -41,6 +41,7 @@ export type BackendGenerationTaskInput = {
   label?: string;
   timeoutMs?: number;
   submitTimeoutMs?: number;
+  submitRetries?: number;
   submit: BackendGenerationRequestSpec;
   poll?: BackendGenerationRequestSpec;
   parse?: {

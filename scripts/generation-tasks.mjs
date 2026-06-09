@@ -14,6 +14,8 @@ const MAX_CACHED_MEDIA_BYTES = Number(process.env.MAX_GENERATION_TASK_MEDIA_BYTE
 const DEFAULT_TASK_TIMEOUT_MS = Number(process.env.GENERATION_TASK_TIMEOUT_MS || 10 * 60 * 1000)
 const DEFAULT_POLL_INTERVAL_MS = Number(process.env.GENERATION_TASK_POLL_INTERVAL_MS || 2_000)
 const SUBMIT_TIMEOUT_MS = Number(process.env.GENERATION_TASK_SUBMIT_TIMEOUT_MS || DEFAULT_TASK_TIMEOUT_MS)
+const SUBMIT_RETRY_ATTEMPTS = Number(process.env.GENERATION_TASK_SUBMIT_RETRIES || 1)
+const SUBMIT_RETRY_BASE_DELAY_MS = Number(process.env.GENERATION_TASK_SUBMIT_RETRY_BASE_DELAY_MS || 2_000)
 const POLL_REQUEST_TIMEOUT_MS = Number(process.env.GENERATION_TASK_POLL_REQUEST_TIMEOUT_MS || 60_000)
 const MEDIA_FETCH_TIMEOUT_MS = Number(process.env.GENERATION_TASK_MEDIA_FETCH_TIMEOUT_MS || 120_000)
 const TASK_RETENTION_MS = Number(process.env.GENERATION_TASK_RETENTION_MS || 60 * 60 * 1000)
@@ -80,6 +82,51 @@ async function sendBinary(req, res, task) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || '')
+}
+
+function detailedErrorMessage(error) {
+  const message = errorMessage(error)
+  const cause = error?.cause
+  if (!cause) return message
+  const causeMessage = errorMessage(cause)
+  const causeCode = cause?.code ? ` (${cause.code})` : ''
+  return causeMessage && causeMessage !== message
+    ? `${message}: ${causeMessage}${causeCode}`
+    : `${message}${causeCode}`
+}
+
+function summarizeUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl)
+    return `${parsed.origin}${parsed.pathname}`
+  } catch {
+    return String(rawUrl || '').slice(0, 160)
+  }
+}
+
+function isAbortError(error) {
+  return error?.name === 'AbortError'
+}
+
+function isRetryableTransportError(error) {
+  const detail = detailedErrorMessage(error).toLowerCase()
+  return /fetch failed|socket|econnreset|econnrefused|etimedout|eai_again|enotfound|und_err|terminated|connection|network/i.test(detail)
+}
+
+function readableTransportFailure(error) {
+  const detail = detailedErrorMessage(error)
+  const code = error?.cause?.code || error?.code || ''
+  if (/fetch failed/i.test(detail)) {
+    return `连接没有返回可用响应，可能被上游服务、Nginx/CDN 或网络代理提前关闭${code ? `（${code}）` : ''}`
+  }
+  return detail
+}
+
+function createTransportError(targetUrl, method, error) {
+  const err = new Error(`上游网络连接中断：${method} ${summarizeUrl(targetUrl)}。${readableTransportFailure(error)}`)
+  err.retryable = isRetryableTransportError(error)
+  err.cause = error
+  return err
 }
 
 function publicTask(task) {
@@ -311,15 +358,19 @@ async function fetchWithProxyFallback(targetUrl, method, headers, body, timeoutM
   } catch (error) {
     const proxyUrl = getProxyUrl(targetUrl)
     if (!proxyUrl) {
-      if (error?.name === 'AbortError') throw new Error(`Upstream request timed out after ${timeoutMs}ms`)
-      throw error
+      if (isAbortError(error)) throw new Error(`Upstream request timed out after ${timeoutMs}ms`)
+      throw createTransportError(targetUrl, method, error)
     }
     console.warn('[generation-task] direct upstream fetch failed; retrying via proxy', {
       targetUrl,
       proxyUrl,
-      detail: errorMessage(error),
+      detail: detailedErrorMessage(error),
     })
-    return fetchViaProxy(targetUrl, method, headers, body, proxyUrl)
+    try {
+      return await fetchViaProxy(targetUrl, method, headers, body, proxyUrl)
+    } catch (proxyError) {
+      throw createTransportError(targetUrl, method, proxyError)
+    }
   } finally {
     clearTimeout(timeout)
   }
@@ -357,6 +408,28 @@ async function executeRequest(spec, timeoutMs) {
   const method = String(spec.method || (spec.body || spec.bodyBase64 || spec.formData ? 'POST' : 'GET')).toUpperCase()
   const { headers, body } = buildRequestPayload(spec)
   return fetchWithProxyFallback(spec.url, method, headers, body, timeoutMs)
+}
+
+async function executeRequestWithRetries(spec, timeoutMs, retries, label) {
+  let lastError
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await executeRequest(spec, timeoutMs)
+    } catch (error) {
+      lastError = error
+      if (!error?.retryable || attempt >= retries) throw error
+      const delay = SUBMIT_RETRY_BASE_DELAY_MS * Math.max(1, attempt + 1)
+      console.warn('[generation-task] upstream submit transport failed; retrying', {
+        label,
+        attempt: attempt + 1,
+        retries,
+        delay,
+        detail: detailedErrorMessage(error),
+      })
+      await sleep(delay)
+    }
+  }
+  throw lastError
 }
 
 async function readResponseText(response) {
@@ -768,7 +841,12 @@ async function runTask(req, task) {
       task.updatedAt = Date.now()
       await persistTask(task)
 
-      const submitResponse = await executeRequest(input.submit, input.submitTimeoutMs || SUBMIT_TIMEOUT_MS)
+      const submitResponse = await executeRequestWithRetries(
+        input.submit,
+        input.submitTimeoutMs || SUBMIT_TIMEOUT_MS,
+        Math.max(0, Number(input.submitRetries ?? SUBMIT_RETRY_ATTEMPTS)),
+        task.label || task.kind || task.id,
+      )
       const submitText = await readResponseText(submitResponse)
       if (!submitResponse.ok) {
         throw new Error(`上游提交失败：HTTP ${submitResponse.status} ${submitText.slice(0, 500)}`)
@@ -811,10 +889,21 @@ async function runTask(req, task) {
       await persistTask(task)
 
       const pollUrl = resolveTemplate(input.poll.url, task)
-      const pollResponse = await executeRequest(
-        { ...input.poll, url: pollUrl },
-        input.poll.requestTimeoutMs || POLL_REQUEST_TIMEOUT_MS,
-      )
+      let pollResponse
+      try {
+        pollResponse = await executeRequest(
+          { ...input.poll, url: pollUrl },
+          input.poll.requestTimeoutMs || POLL_REQUEST_TIMEOUT_MS,
+        )
+      } catch (error) {
+        console.warn('[generation-task] transient poll transport failure', {
+          taskId: task.id,
+          upstreamTaskId: task.upstreamTaskId,
+          detail: detailedErrorMessage(error),
+        })
+        await sleep(pollIntervalMs)
+        continue
+      }
       const pollText = await readResponseText(pollResponse)
       if (!pollResponse.ok) {
         if (shouldFailStatus(pollResponse.status)) {
