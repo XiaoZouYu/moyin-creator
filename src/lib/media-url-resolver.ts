@@ -59,6 +59,37 @@ function canResolvePlatformPublicImageUrl(source?: string | null): boolean {
     && source.startsWith('local-image://');
 }
 
+function isSameOriginCloudMediaUrl(value: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return parsed.origin === window.location.origin && parsed.pathname.startsWith('/__cloud_media/file');
+  } catch {
+    return false;
+  }
+}
+
+function canIngestHttpMediaUrl(value: string): boolean {
+  return typeof window !== 'undefined'
+    && !!window.imageStorage?.saveImage
+    && isHttpMediaUrl(value)
+    && !isSameOriginCloudMediaUrl(value);
+}
+
+async function ingestHttpImageToPublicUrl(
+  url: string,
+  options: ResolveImageToHttpUrlOptions,
+): Promise<string | null> {
+  if (!canIngestHttpMediaUrl(url)) return null;
+  const saved = await window.imageStorage?.saveImage?.(
+    url,
+    getUserScopedMediaCategory('external'),
+    options.uploadName?.trim() || `media_ref_${Date.now()}.png`,
+  );
+  if (!saved?.success || !saved.localPath) return null;
+  return resolvePlatformPublicImageUrl(saved.localPath);
+}
+
 async function ensureDataUrlMinDimension(dataUrl: string, minDimension?: number): Promise<string> {
   if (!minDimension || minDimension <= 0 || typeof document === 'undefined') return dataUrl;
 
@@ -265,11 +296,16 @@ export async function resolveImageToHttpUrl(
 
     if (options.forceReuploadHttp) {
       if (!isImageHostConfigured()) {
+        const publicUrl = await ingestHttpImageToPublicUrl(url, options);
+        if (publicUrl) return publicUrl;
         throw new Error(`${label}需要重新上传外部 HTTP 图片，但图床未配置，请先在设置中启用 Catbox 或其他可用图床`);
       }
       console.log(`[${logPrefix}] ${label}: re-uploading external HTTP image before API submission`);
       return uploadDataUrlToImageHost(await mediaUrlToDataUrl(url), options);
     }
+
+    const publicUrl = await ingestHttpImageToPublicUrl(url, options);
+    if (publicUrl) return publicUrl;
 
     if (isDiscouragedExternalImageUrl(url)) {
       console.warn(`[${logPrefix}] ${label}: using external URL without local fallback:`, url.substring(0, 80));
@@ -318,7 +354,11 @@ export async function prepareImageReferencesForApi(
     try {
       let input = options.forceDataUrl || !isHttpMediaUrl(ref)
         ? await mediaUrlToDataUrl(ref)
-        : ref;
+        : await resolveImageToHttpUrl(ref, {
+          uploadName: `reference_${Date.now()}_${prepared.length + 1}`,
+          frameLabel: '图片引用',
+          logPrefix,
+        });
 
       if (options.requireBase64DataUrl && !isHttpMediaUrl(input)) {
         try {

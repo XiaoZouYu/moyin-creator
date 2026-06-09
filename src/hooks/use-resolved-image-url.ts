@@ -5,7 +5,7 @@
  * useResolvedImageUrl — Resolve image URLs for display in <img> tags.
  *
  * Handles URL formats:
- * - `https://...` / `http://...` → pass through
+ * - `https://...` / `http://...` → ingested by backend media storage, then resolved
  * - `data:image/...` → pass through (legacy base64)
  * - `local-image://...` → resolved through the platform image storage bridge
  * - `null/undefined/''` → null
@@ -15,7 +15,11 @@
  */
 
 import { useEffect, useState } from 'react';
-import { resolveImagePath } from '@/lib/image-storage';
+import { resolveImagePath, saveImageToLocal } from '@/lib/image-storage';
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
 
 /**
  * React hook to resolve an image URL for rendering.
@@ -29,6 +33,26 @@ export function useResolvedImageUrl(rawUrl: string | null | undefined): string |
 
     if (!rawUrl) {
       setResolvedUrl(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (isHttpUrl(rawUrl)) {
+      setResolvedUrl(null);
+      saveImageToLocal(rawUrl, 'shots', `display-${Date.now()}.png`)
+        .then((localPath) => {
+          if (isHttpUrl(localPath) && localPath === rawUrl) {
+            throw new Error('后端媒体摄取失败');
+          }
+          return resolveImagePath(localPath);
+        })
+        .then((url) => {
+          if (!cancelled) setResolvedUrl(url);
+        })
+        .catch(() => {
+          if (!cancelled) setResolvedUrl(null);
+        });
       return () => {
         cancelled = true;
       };

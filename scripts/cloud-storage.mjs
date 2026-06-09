@@ -1,4 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { lookup } from 'node:dns/promises'
+import net from 'node:net'
 import { resolve } from 'node:path'
 import OSS from 'ali-oss'
 import pg from 'pg'
@@ -8,6 +10,8 @@ const { Pool } = pg
 const DEFAULT_TABLE_NAME = 'moyin_user_storage'
 const DEFAULT_OSS_PREFIX = 'mj/'
 const MAX_CLOUD_BODY_BYTES = Number(process.env.MAX_CLOUD_BODY_BYTES || 200 * 1024 * 1024)
+const MAX_MEDIA_INGEST_BYTES = Number(process.env.MAX_MEDIA_INGEST_BYTES || 500 * 1024 * 1024)
+const MEDIA_INGEST_TIMEOUT_MS = Number(process.env.MEDIA_INGEST_TIMEOUT_MS || 30_000)
 const CLOUD_UNAVAILABLE_RETRY_MS = Number(process.env.CLOUD_UNAVAILABLE_RETRY_MS || 30_000)
 
 let dotenvLoaded = false
@@ -115,11 +119,19 @@ function isTemporaryInfrastructureError(error) {
 
 function httpStatusForError(error) {
   if (typeof error?.statusCode === 'number') return error.statusCode
+  const message = errorMessage(error)
+  if (/Media ingest upstream failed/i.test(message)) return 502
+  if (/Content-Type|unsupported media|expected (image|video|audio)/i.test(message)) return 415
+  if (/Blocked|must use HTTP|Missing media ingest|redirect|exceeded redirect|did not resolve|private media host/i.test(message)) return 400
   return isTemporaryInfrastructureError(error) ? 503 : 500
 }
 
 function logRequestFailure(scope, error, status) {
   const message = errorMessage(error)
+  if (status >= 400 && status < 500) {
+    console.warn(`[${scope}] rejected request: ${message}`)
+    return
+  }
   if (status !== 503) {
     console.error(`[${scope}] request failed:`, error)
     return
@@ -159,6 +171,159 @@ function normalizeStorageKey(value) {
   if (key.length > 2048) throw new Error('Storage key is too long')
   if (key.includes('\0')) throw new Error('Invalid storage key')
   return key
+}
+
+function isPrivateIpv4(address) {
+  const parts = address.split('.').map((part) => Number(part))
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true
+  const [a, b] = parts
+  return a === 0
+    || a === 10
+    || a === 127
+    || a === 169 && b === 254
+    || a === 172 && b >= 16 && b <= 31
+    || a === 192 && b === 168
+    || a === 100 && b >= 64 && b <= 127
+    || a >= 224
+}
+
+function isPrivateIpv6(address) {
+  const normalized = address.toLowerCase()
+  return normalized === '::1'
+    || normalized === '::'
+    || normalized.startsWith('fc')
+    || normalized.startsWith('fd')
+    || normalized.startsWith('fe80:')
+    || normalized.startsWith('::ffff:127.')
+    || normalized.startsWith('::ffff:10.')
+    || normalized.startsWith('::ffff:192.168.')
+}
+
+function assertPublicAddress(address) {
+  const family = net.isIP(address)
+  if (family === 4 && isPrivateIpv4(address)) {
+    throw new Error(`Blocked private media host address: ${address}`)
+  }
+  if (family === 6 && isPrivateIpv6(address)) {
+    throw new Error(`Blocked private media host address: ${address}`)
+  }
+}
+
+async function assertSafeIngestUrl(rawUrl) {
+  const parsed = new URL(String(rawUrl || '').trim())
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Media ingest URL must use HTTP(S)')
+  }
+  const hostname = parsed.hostname.toLowerCase()
+  if (['localhost', 'localhost.localdomain'].includes(hostname) || hostname.endsWith('.localhost')) {
+    throw new Error('Blocked localhost media ingest URL')
+  }
+  const directIp = net.isIP(hostname)
+  if (directIp) {
+    assertPublicAddress(hostname)
+    return parsed
+  }
+  const addresses = await lookup(hostname, { all: true, verbatim: false })
+  if (addresses.length === 0) throw new Error('Media ingest host did not resolve')
+  for (const address of addresses) {
+    assertPublicAddress(address.address)
+  }
+  return parsed
+}
+
+function mediaKindFromContentType(contentType) {
+  const mimeType = String(contentType || '').split(';')[0].trim().toLowerCase()
+  if (mimeType.startsWith('image/')) return 'image'
+  if (mimeType.startsWith('video/')) return 'video'
+  if (mimeType.startsWith('audio/')) return 'audio'
+  return 'media'
+}
+
+function assertAllowedIngestContentType(contentType, expectedKind) {
+  const mimeType = String(contentType || '').split(';')[0].trim().toLowerCase()
+  if (!mimeType) throw new Error('Media ingest response did not include Content-Type')
+  const actualKind = mediaKindFromContentType(mimeType)
+  const expected = String(expectedKind || 'media').toLowerCase()
+  if (expected !== 'media' && actualKind !== expected) {
+    throw new Error(`Media ingest expected ${expected}, got ${mimeType}`)
+  }
+  if (!['image', 'video', 'audio'].includes(actualKind)) {
+    throw new Error(`Media ingest rejected unsupported Content-Type: ${mimeType}`)
+  }
+  return mimeType
+}
+
+async function readResponseWithLimit(response, maxBytes) {
+  const contentLength = Number(response.headers.get('content-length') || 0)
+  if (contentLength > maxBytes) {
+    throw new Error(`Media ingest response exceeds ${maxBytes} bytes`)
+  }
+  if (!response.body) {
+    return Buffer.from(await response.arrayBuffer())
+  }
+
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const chunk = Buffer.from(value)
+    total += chunk.length
+    if (total > maxBytes) {
+      throw new Error(`Media ingest response exceeds ${maxBytes} bytes`)
+    }
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks)
+}
+
+async function fetchIngestMedia(rawUrl, expectedKind) {
+  let currentUrl = String(rawUrl || '').trim()
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), MEDIA_INGEST_TIMEOUT_MS)
+
+  try {
+    for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+      const parsed = await assertSafeIngestUrl(currentUrl)
+      const response = await fetch(parsed.toString(), {
+        method: 'GET',
+        redirect: 'manual',
+        signal: controller.signal,
+        headers: {
+          Accept: 'image/*, video/*, audio/*, application/octet-stream;q=0.8, */*;q=0.1',
+          'User-Agent': 'MoyinCreatorMediaIngest/1.0',
+        },
+      })
+
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location')
+        if (!location) throw new Error(`Media ingest redirect ${response.status} missing Location`)
+        currentUrl = new URL(location, parsed).toString()
+        continue
+      }
+
+      if (!response.ok) {
+        throw new Error(`Media ingest upstream failed: HTTP ${response.status} ${response.statusText || ''}`.trim())
+      }
+
+      const mimeType = assertAllowedIngestContentType(response.headers.get('content-type'), expectedKind)
+      const content = await readResponseWithLimit(response, MAX_MEDIA_INGEST_BYTES)
+      return {
+        content,
+        mimeType,
+        sourceUrl: parsed.toString(),
+      }
+    }
+    throw new Error('Media ingest exceeded redirect limit')
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`Media ingest timed out after ${MEDIA_INGEST_TIMEOUT_MS}ms`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 function getUserSegmentFromKey(key) {
@@ -477,6 +642,35 @@ export async function handleCloudMediaRequest(req, res) {
         success: true,
         key,
         objectKey,
+        url: publicUrl || cloudMediaFileUrl(req, key),
+      })
+      return
+    }
+
+    if (action === 'ingest' && (req.method === 'POST' || req.method === 'PUT')) {
+      const body = await readJsonBody(req)
+      const key = normalizeStorageKey(body.key)
+      const sourceUrl = String(body.url || '').trim()
+      if (!sourceUrl) throw new Error('Missing media ingest url')
+      const expectedKind = String(body.expectedKind || 'media').toLowerCase()
+      const objectKey = ossObjectKey(key)
+      const fetched = await fetchIngestMedia(sourceUrl, expectedKind)
+      await client.put(objectKey, fetched.content, {
+        mime: fetched.mimeType,
+        headers: {
+          'Content-Type': fetched.mimeType,
+          'Cache-Control': 'public, max-age=31536000',
+          'X-Moyin-Source-Url': fetched.sourceUrl.slice(0, 1024),
+        },
+      })
+      const publicUrl = publicOssUrl(objectKey)
+      sendJson(res, 200, {
+        success: true,
+        key,
+        objectKey,
+        mimeType: fetched.mimeType,
+        size: fetched.content.length,
+        sourceUrl: fetched.sourceUrl,
         url: publicUrl || cloudMediaFileUrl(req, key),
       })
       return

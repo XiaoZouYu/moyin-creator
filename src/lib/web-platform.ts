@@ -1,5 +1,6 @@
 import packageJson from '../../package.json'
 import { corsFetch } from './cors-fetch'
+import { getUserScopedMediaCategory } from './user-session'
 
 const DB_NAME = 'santi-creator-web-platform'
 const DB_VERSION = 1
@@ -19,6 +20,16 @@ type MediaRecord = {
   mimeType: string
   size: number
   createdAt: number
+}
+
+type MediaKind = 'image' | 'video' | 'audio' | 'media'
+
+type CloudMediaIngestResult = {
+  success: boolean
+  key: string
+  url?: string
+  mimeType?: string
+  size?: number
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null
@@ -184,6 +195,39 @@ function extensionForMimeType(mimeType: string): string {
 function ensureExtension(filename: string, mimeType: string): string {
   if (/\.[a-z0-9]{2,8}$/i.test(filename)) return filename
   return `${filename}.${extensionForMimeType(mimeType)}`
+}
+
+function defaultExtensionForMediaKind(kind: MediaKind): string {
+  switch (kind) {
+    case 'video':
+      return 'mp4'
+    case 'audio':
+      return 'mp3'
+    case 'image':
+      return 'png'
+    case 'media':
+    default:
+      return 'bin'
+  }
+}
+
+function mediaKindForCategory(category: string): MediaKind {
+  const normalized = category.toLowerCase()
+  if (normalized.includes('video')) return 'video'
+  if (normalized.includes('audio')) return 'audio'
+  return 'image'
+}
+
+function filenameFromUrl(source: string, fallbackKind: MediaKind): string {
+  try {
+    const parsed = new URL(source)
+    const pathname = decodeURIComponent(parsed.pathname)
+    const base = pathname.split('/').pop()?.trim()
+    if (base) return safeFilename(base)
+  } catch {
+    // Use generated fallback below.
+  }
+  return `remote-${Date.now()}.${defaultExtensionForMediaKind(fallbackKind)}`
 }
 
 function isHttpUrl(value: string): boolean {
@@ -366,6 +410,18 @@ async function cloudMediaSave(key: string, blob: Blob): Promise<{ success: boole
   return { success: !!data.success, url: data.url }
 }
 
+async function cloudMediaIngest(key: string, url: string, expectedKind: MediaKind): Promise<CloudMediaIngestResult> {
+  const data = await fetchCloudJson<CloudMediaIngestResult>('/__cloud_media/ingest', {
+    method: 'POST',
+    body: JSON.stringify({
+      key,
+      url,
+      expectedKind,
+    }),
+  }, { media: true })
+  return data
+}
+
 async function cloudMediaUrl(key: string): Promise<string | null> {
   const data = await fetchCloudJson<{ url?: string }>(`/__cloud_media/url?key=${encodeURIComponent(key)}`, undefined, { media: true })
   return data.url || null
@@ -416,6 +472,27 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   })
 }
 
+async function ingestExternalMedia(
+  source: string,
+  category: string,
+  filename: string | undefined,
+  expectedKind: MediaKind,
+): Promise<{ key: string; localPath: string; mimeType?: string; size?: number; url?: string }> {
+  const safeName = safeFilename(filename || filenameFromUrl(source, expectedKind))
+  const key = `${category}/${safeName}`
+  const result = await cloudMediaIngest(key, source, expectedKind)
+  if (!result.success) {
+    throw new Error('Cloud media ingest failed')
+  }
+  return {
+    key,
+    localPath: toLocalMediaUrl(category, safeName),
+    mimeType: result.mimeType,
+    size: result.size,
+    url: result.url,
+  }
+}
+
 async function sourceToBlob(source: string): Promise<Blob> {
   if (source.startsWith('local-image://')) {
     const local = parseLocalMediaUrl(source)
@@ -436,10 +513,21 @@ async function sourceToBlob(source: string): Promise<Blob> {
     const response = await fetch(source)
     return response.blob()
   }
-  const response = await webFetch(source)
-  if (!response.ok) {
-    throw new Error(`Fetch failed: ${response.status}`)
+  if (isHttpUrl(source)) {
+    const ingested = await ingestExternalMedia(
+      source,
+      getUserScopedMediaCategory('external'),
+      filenameFromUrl(source, 'media'),
+      'media',
+    )
+    const cloud = await cloudMediaBase64(ingested.key)
+    if (!cloud?.base64) {
+      throw new Error('Cloud media ingest succeeded but base64 read failed')
+    }
+    return base64ToBlob(cloud.base64, cloud.mimeType || ingested.mimeType || 'application/octet-stream')
   }
+  const response = await webFetch(source)
+  if (!response.ok) throw new Error(`Fetch failed: ${response.status}`)
   return response.blob()
 }
 
@@ -685,9 +773,14 @@ function installImageStorage() {
           return { success: true, localPath: url }
         }
 
+        const mediaKind = mediaKindForCategory(category)
+        if (isHttpUrl(url)) {
+          const ingested = await ingestExternalMedia(url, category, filename, mediaKind)
+          return { success: true, localPath: ingested.localPath }
+        }
+
         const blob = await sourceToBlob(url)
-        const mediaCategory = category.toLowerCase()
-        if (!mediaCategory.includes('video') && !mediaCategory.includes('audio')) {
+        if (mediaKind === 'image') {
           await assertImageUploadBlob(blob)
         }
         const safeName = ensureExtension(safeFilename(filename), blob.type || 'application/octet-stream')
@@ -926,7 +1019,56 @@ function patchLocalMediaElements() {
   const originalSetAttribute = Element.prototype.setAttribute
   const originalGetAttribute = Element.prototype.getAttribute
 
+  const isSameOriginMediaUrl = (rawValue: string): boolean => {
+    try {
+      const parsed = new URL(rawValue, window.location.origin)
+      return parsed.origin === window.location.origin
+    } catch {
+      return false
+    }
+  }
+
+  const isExternalHttpMediaUrl = (rawValue: string): boolean => {
+    return isHttpUrl(rawValue) && !isSameOriginMediaUrl(rawValue)
+  }
+
+  const mediaKindForElement = (element: Element): MediaKind => {
+    if (element instanceof HTMLVideoElement || element instanceof HTMLAudioElement) {
+      return element instanceof HTMLAudioElement ? 'audio' : 'video'
+    }
+    if (element instanceof HTMLSourceElement) {
+      const parent = element.parentElement
+      if (parent instanceof HTMLAudioElement) return 'audio'
+      if (parent instanceof HTMLVideoElement) return 'video'
+    }
+    return 'image'
+  }
+
+  const categoryForMediaKind = (kind: MediaKind): string => {
+    if (kind === 'video') return getUserScopedMediaCategory('videos')
+    if (kind === 'audio') return getUserScopedMediaCategory('audios')
+    return getUserScopedMediaCategory('shots')
+  }
+
   const resolveSrc = (element: Element, rawValue: string, apply: (value: string) => void) => {
+    if (isExternalHttpMediaUrl(rawValue)) {
+      originalSetAttribute.call(element, 'data-web-local-src', rawValue)
+      const kind = mediaKindForElement(element)
+      window.imageStorage?.saveImage(
+        rawValue,
+        categoryForMediaKind(kind),
+        filenameFromUrl(rawValue, kind),
+      ).then(async (saved) => {
+        if (!saved.success || !saved.localPath) return null
+        return window.imageStorage?.getImagePath(saved.localPath)
+      }).then((resolved) => {
+        if (!resolved) return
+        if (originalGetAttribute.call(element, 'data-web-local-src') !== rawValue) return
+        apply(resolved)
+      }).catch(() => undefined)
+      return
+    }
+
     if (!rawValue.startsWith('local-image://')) {
       apply(rawValue)
       return

@@ -10,6 +10,7 @@
 
 import { corsFetch } from '@/lib/cors-fetch';
 import { readImageAsBase64 } from '@/lib/image-storage';
+import { getUserScopedMediaCategory } from '@/lib/user-session';
 
 export function normalizeMediaUrl(value: unknown): string {
   if (typeof value === 'string') return value.trim();
@@ -31,6 +32,27 @@ export function isDataUrl(value?: string | null): boolean {
 
 export function isBlobUrl(value?: string | null): boolean {
   return typeof value === 'string' && /^blob:/i.test(value);
+}
+
+function filenameFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const base = decodeURIComponent(parsed.pathname).split('/').pop()?.trim();
+    if (base) return base.replace(/[<>:"/\\|?*]/g, '_');
+  } catch {
+    // Use fallback below.
+  }
+  return `remote-${Date.now()}`;
+}
+
+async function ingestHttpMediaToLocal(url: string): Promise<string | null> {
+  if (typeof window === 'undefined' || !window.imageStorage?.saveImage) return null;
+  const result = await window.imageStorage.saveImage(
+    url,
+    getUserScopedMediaCategory('external'),
+    filenameFromUrl(url),
+  );
+  return result.success && result.localPath ? result.localPath : null;
 }
 
 export function dataUrlToBlob(dataUrl: string, fallbackMimeType = 'application/octet-stream'): Blob {
@@ -80,6 +102,18 @@ export async function mediaUrlToBlob(source: string): Promise<Blob> {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`无法读取 blob URL: HTTP ${response.status}`);
     return response.blob();
+  }
+
+  if (isHttpMediaUrl(url)) {
+    try {
+      const localPath = await ingestHttpMediaToLocal(url);
+      if (localPath && localPath !== url) {
+        return mediaUrlToBlob(localPath);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`后端媒体摄取失败：${message}`);
+    }
   }
 
   try {

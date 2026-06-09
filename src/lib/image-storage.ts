@@ -135,9 +135,7 @@ export async function readImageAsBase64(imagePath: string): Promise<string | nul
       console.error('Error reading image as base64:', error);
     }
 
-    if (!imagePath.startsWith('http://') && !imagePath.startsWith('https://')) {
-      return null;
-    }
+    return null;
   }
 
   // If it's a remote URL, fetch and convert
