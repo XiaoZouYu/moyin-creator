@@ -7,10 +7,12 @@
  */
 
 import type { Shot } from "@/types/script";
-import { corsFetch } from "@/lib/cors-fetch";
-import { retryOperation } from "@/lib/utils/retry";
 import { delay, RATE_LIMITS } from "@/lib/utils/rate-limiter";
-import { throwUpstreamResponseError } from "@/lib/ai/provider-errors";
+import {
+  defaultGenerationParse,
+  getBackendTaskResultUrl,
+  runBackendGenerationTask,
+} from "@/lib/backend-generation-task";
 
 const buildEndpoint = (baseUrl: string, path: string) => {
   const normalized = baseUrl.replace(/\/+$/, '');
@@ -32,102 +34,6 @@ export interface ShotGenerationConfig {
 export interface ShotGenerationResult {
   imageUrl?: string;
   videoUrl?: string;
-}
-
-/**
- * Poll task status until completion
- */
-async function pollTaskStatus(
-  taskId: string,
-  apiKey: string,
-  baseUrl: string,
-  type: 'image' | 'video',
-  onProgress?: (progress: number) => void
-): Promise<string> {
-  const maxAttempts = 120;
-  const pollInterval = 2000;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const progress = Math.min(Math.floor((attempt / maxAttempts) * 100), 99);
-    onProgress?.(progress);
-
-    try {
-      const url = new URL(buildEndpoint(baseUrl, `tasks/${taskId}`));
-      url.searchParams.set('_ts', Date.now().toString());
-
-      const response = await corsFetch(url.toString(), {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Cache-Control': 'no-cache',
-        },
-      });
-
-      if (!response.ok) {
-        await throwUpstreamResponseError(response);
-      }
-
-      const data = await response.json();
-      const status = (data.status ?? data.data?.status ?? 'unknown').toString().toLowerCase();
-
-      const statusMap: Record<string, string> = {
-        'pending': 'pending',
-        'submitted': 'pending',
-        'queued': 'pending',
-        'processing': 'processing',
-        'running': 'processing',
-        'in_progress': 'processing',
-        'completed': 'completed',
-        'succeeded': 'completed',
-        'success': 'completed',
-        'failed': 'failed',
-        'error': 'failed',
-      };
-
-      const mappedStatus = statusMap[status] || 'processing';
-
-      if (mappedStatus === 'completed') {
-        onProgress?.(100);
-        
-        let resultUrl: string | undefined;
-        if (type === 'image') {
-          const images = data.result?.images ?? data.data?.result?.images;
-          if (images?.[0]) {
-            const urlField = images[0].url;
-            resultUrl = Array.isArray(urlField) ? urlField[0] : urlField;
-          }
-        } else {
-          const videos = data.result?.videos ?? data.data?.result?.videos;
-          if (videos?.[0]) {
-            const urlField = videos[0].url;
-            resultUrl = Array.isArray(urlField) ? urlField[0] : urlField;
-          }
-        }
-        resultUrl = resultUrl || data.output_url || data.result_url || data.url;
-
-        if (!resultUrl) {
-          throw new Error('Task completed but no URL in result');
-        }
-        return resultUrl;
-      }
-
-      if (mappedStatus === 'failed') {
-        const rawError = data.error || data.error_message || data.data?.error;
-        throw new Error(rawError || 'Task failed');
-      }
-
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
-    } catch (error) {
-      if (error instanceof Error && 
-          (error.message.includes('Task failed') || 
-           error.message.includes('no URL'))) {
-        throw error;
-      }
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
-    }
-  }
-
-  throw new Error(`Task ${taskId} timed out`);
 }
 
 /**
@@ -178,46 +84,35 @@ export async function generateShotImage(
 
   onProgress?.(10);
 
-  // Use retry wrapper for 429 rate limit handling
-  const data = await retryOperation(async () => {
-    const response = await corsFetch(buildEndpoint(baseUrl, 'images/generations'), {
+  const task = await runBackendGenerationTask({
+    kind: 'image',
+    label: `shot-image:${shot.id}`,
+    submit: {
+      url: buildEndpoint(baseUrl, 'images/generations'),
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(requestData),
-    });
-
-    if (!response.ok) {
-      await throwUpstreamResponseError(response);
-    }
-
-    return response.json();
+    },
+    poll: {
+      url: buildEndpoint(baseUrl, 'tasks/{taskId}'),
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Cache-Control': 'no-cache',
+      },
+      intervalMs: 2000,
+    },
+    parse: defaultGenerationParse('image'),
+    result: { mediaKind: 'image' },
   }, {
-    maxRetries: 3,
-    baseDelay: 3000,
+    intervalMs: 2000,
+    onProgress,
   });
-
-  onProgress?.(30);
-
-  // Check for direct URL
-  const directUrl = data.data?.[0]?.url || data.url;
-  if (directUrl) {
-    onProgress?.(100);
-    return directUrl;
-  }
-
-  // Get task ID and poll
-  const taskId = data.data?.[0]?.task_id?.toString() || data.task_id?.toString();
-  if (!taskId) {
-    throw new Error('No task_id or image URL in response');
-  }
-
-  const imageUrl = await pollTaskStatus(taskId, apiKey, baseUrl, 'image', (p) => {
-    onProgress?.(30 + Math.floor(p * 0.7));
-  });
-
+  const imageUrl = getBackendTaskResultUrl(task);
+  if (!imageUrl) throw new Error('后端镜头图片任务完成但没有图片 URL');
   return imageUrl;
 }
 
@@ -276,48 +171,35 @@ export async function generateShotVideo(
 
   onProgress?.(10);
 
-  // Use retry wrapper for 429 rate limit handling
-  const data = await retryOperation(async () => {
-    const response = await corsFetch(buildEndpoint(baseUrl, 'videos/generations'), {
+  const task = await runBackendGenerationTask({
+    kind: 'video',
+    label: `shot-video:${shot.id}`,
+    submit: {
+      url: buildEndpoint(baseUrl, 'videos/generations'),
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      await throwUpstreamResponseError(response);
-    }
-
-    return response.json();
+    },
+    poll: {
+      url: buildEndpoint(baseUrl, 'tasks/{taskId}'),
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Cache-Control': 'no-cache',
+      },
+      intervalMs: 2000,
+    },
+    parse: defaultGenerationParse('video'),
+    result: { mediaKind: 'video' },
   }, {
-    maxRetries: 3,
-    baseDelay: 5000,
+    intervalMs: 2000,
+    onProgress,
   });
-
-  onProgress?.(30);
-
-  // Get task ID
-  let taskId: string | undefined;
-  const dataField = data.data;
-  if (Array.isArray(dataField) && dataField.length > 0) {
-    taskId = dataField[0].task_id?.toString() || dataField[0].id?.toString();
-  } else if (dataField && typeof dataField === 'object') {
-    taskId = dataField.task_id?.toString() || dataField.id?.toString();
-  } else {
-    taskId = data.task_id?.toString() || data.id?.toString();
-  }
-
-  if (!taskId) {
-    throw new Error('No task ID in response');
-  }
-
-  const videoUrl = await pollTaskStatus(taskId, apiKey, baseUrl, 'video', (p) => {
-    onProgress?.(30 + Math.floor(p * 0.7));
-  });
-
+  const videoUrl = getBackendTaskResultUrl(task);
+  if (!videoUrl) throw new Error('后端镜头视频任务完成但没有视频 URL');
   return videoUrl;
 }
 

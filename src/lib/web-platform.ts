@@ -1,6 +1,7 @@
 import packageJson from '../../package.json'
 import { corsFetch } from './cors-fetch'
 import { getUserScopedMediaCategory } from './user-session'
+import { normalizeNetworkErrorMessage } from './network-error'
 
 const DB_NAME = 'santi-creator-web-platform'
 const DB_VERSION = 1
@@ -643,7 +644,7 @@ async function apiFetch(options: Parameters<NonNullable<Window['electronAPI']>['
       statusText: '',
       headers: {},
       body: '',
-      error: error instanceof Error ? error.message : String(error),
+      error: normalizeNetworkErrorMessage(error, '后端 API 请求'),
     }
   } finally {
     if (timeout) window.clearTimeout(timeout)
@@ -800,7 +801,7 @@ function installImageStorage() {
         }
         return { success: true, localPath: toLocalMediaUrl(category, safeName) }
       } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) }
+        return { success: false, error: normalizeNetworkErrorMessage(error, '媒体保存') }
       }
     },
     getImagePath: async (localPath) => {
@@ -848,7 +849,7 @@ function installImageStorage() {
           size: blob.size,
         }
       } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) }
+        return { success: false, error: normalizeNetworkErrorMessage(error, '媒体读取') }
       }
     },
     getAbsolutePath: async () => null,
@@ -865,7 +866,7 @@ function installApiBridge() {
         triggerDownload(blob, defaultPath || 'download')
         return { success: true, filePath: defaultPath }
       } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) }
+        return { success: false, error: normalizeNetworkErrorMessage(error, '文件保存') }
       }
     },
     apiFetch,
@@ -917,7 +918,7 @@ function installAppUpdater() {
         window.open(parsed.toString(), '_blank', 'noopener,noreferrer')
         return { success: true }
       } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) }
+        return { success: false, error: normalizeNetworkErrorMessage(error, '图床上传') }
       }
     },
   }
@@ -1006,7 +1007,7 @@ function installImageHostUploader() {
           deleteUrl: deleteField ? String(deleteField) : undefined,
         }
       } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) }
+        return { success: false, error: normalizeNetworkErrorMessage(error, '图床上传') }
       }
     },
   }

@@ -2,7 +2,6 @@
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { getFeatureConfig } from "@/lib/ai/feature-router";
-import { corsFetch } from "@/lib/cors-fetch";
 import { saveVideoToLocal } from "@/lib/image-storage";
 import { resolveImageToHttpUrl } from "@/lib/media-url-resolver";
 import { normalizeUrl } from "./use-image-generation";
@@ -10,6 +9,14 @@ import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
 import { buildVolcVideoTaskUrls, isVolcArkVideoPlatform } from "@/lib/volc-ark-video";
 import { createProviderError, isProviderContentModerationError } from "@/lib/ai/provider-errors";
+import { normalizeNetworkErrorMessage } from "@/lib/network-error";
+import {
+  defaultGenerationParse,
+  getBackendTaskResultUrl,
+  runBackendGenerationTask,
+  type BackendGenerationTaskInput,
+} from "@/lib/backend-generation-task";
+import { getUserScopedMediaCategory } from "@/lib/user-session";
 import {
   prepareVideoMediaInputs,
   type PreparedVideoImageInput,
@@ -288,37 +295,76 @@ function detectVideoApiFormat(model: string, platform?: string): VideoApiFormat 
 
 // ==================== 通用错误处理 ====================
 
-function handleVideoSubmitError(
-  status: number,
-  errorText: string,
-  keyManager?: { handleError: (status: number, errorText?: string) => boolean; getCurrentKey?: () => string | null },
-  context?: { provider?: string; model?: string; route?: string },
-): never {
-  if (keyManager?.handleError(status, errorText)) {
-    const nextKey = keyManager.getCurrentKey?.();
-    const keyHint = nextKey ? `${nextKey.substring(0, 8)}…` : '(none)';
-    console.log(`[VideoGen] Rotated to next key: ${keyHint} (due to ${status})`);
-  }
-  throw createProviderError({
-    mediaKind: 'video',
-    stage: 'submit',
-    status,
-    errorText,
-    provider: context?.provider,
-    model: context?.model,
-    route: context?.route,
-  });
-}
-
 // ==================== 视频生成主入口 ====================
 
-/** AbortSignal 感知的 sleep：若信号触发则立即以 '用户已取消' 拒绝 */
-function sleepOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) return reject(new Error('用户已取消'));
-    const tid = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => { clearTimeout(tid); reject(new Error('用户已取消')); }, { once: true });
-  });
+function buildVideoStorageKey(model: string): string {
+  const safeModel = model.replace(/[^\w.-]+/g, '_').slice(0, 60) || 'video';
+  return `${getUserScopedMediaCategory('videos')}/generated_${safeModel}_${Date.now()}.mp4`;
+}
+
+async function runBackendVideoTask(params: {
+  provider: string;
+  model: string;
+  route: string;
+  label: string;
+  submitUrl: string;
+  submitHeaders: Record<string, string>;
+  submitBody?: string;
+  submitFormData?: BackendGenerationTaskInput['submit']['formData'];
+  pollUrl?: string;
+  pollHeaders?: Record<string, string>;
+  fallbackUrl?: string;
+  intervalMs?: number;
+  onProgress?: (progress: number) => void;
+  signal?: AbortSignal;
+  parse?: BackendGenerationTaskInput['parse'];
+}): Promise<string> {
+  try {
+    const task = await runBackendGenerationTask({
+      kind: 'video',
+      label: params.label,
+      submit: {
+        url: params.submitUrl,
+        method: 'POST',
+        headers: params.submitHeaders,
+        body: params.submitBody,
+        formData: params.submitFormData,
+      },
+      poll: params.pollUrl ? {
+        url: params.pollUrl,
+        method: 'GET',
+        headers: params.pollHeaders || params.submitHeaders,
+        intervalMs: params.intervalMs || 5000,
+      } : undefined,
+      parse: {
+        ...defaultGenerationParse('video'),
+        ...params.parse,
+      },
+      result: {
+        mediaKind: 'video',
+        storageKey: buildVideoStorageKey(params.model),
+        fallbackUrl: params.fallbackUrl,
+      },
+    }, {
+      signal: params.signal,
+      intervalMs: Math.min(5000, params.intervalMs || 5000),
+      onProgress: (progress) => params.onProgress?.(progress),
+    });
+
+    const resultUrl = getBackendTaskResultUrl(task);
+    if (!resultUrl) throw new Error('后端任务完成但没有视频地址');
+    return resultUrl;
+  } catch (error) {
+    if (params.signal?.aborted) throw error;
+    throw createProviderError({
+      mediaKind: 'video',
+      stage: 'poll',
+      provider: params.provider,
+      model: params.model,
+      route: params.route,
+      originalError: error instanceof Error ? error : new Error(String(error)),
+    });
+  }
 }
 
 // Call video generation API — 根据模型自动路由到正确的 OpenAI 兼容中转 API 格式
@@ -444,38 +490,6 @@ function toRunwayRatio(aspectRatio: string): string {
   return map[aspectRatio] ?? aspectRatio;
 }
 
-/**
- * Extract video URL from various response formats
- */
-function extractVideoUrl(data: Record<string, any>): string | null {
-  const url =
-    data.data?.[0]?.url ||
-    data.url ||
-    data.output?.url ||
-    (typeof data.output === 'string' && data.output.startsWith('http') ? data.output : null) ||
-    (Array.isArray(data.output) && typeof data.output[0] === 'string' ? data.output[0] : null) ||
-    data.outputs?.[0] ||
-    data.video_url ||
-    (typeof data.remixed_from_video_id === 'string' && data.remixed_from_video_id.startsWith('http') ? data.remixed_from_video_id : null) ||
-    data.result_url ||
-    data.response?.url;  // doubao, jimeng, grok, wan2.6
-  return (url ? normalizeUrl(url) : undefined) ?? null;
-}
-
-function getAgnesVideoTaskId(data: Record<string, any>): string | undefined {
-  return (
-    data.task_id ||
-    data.id ||
-    data.video_id ||
-    data.data?.task_id ||
-    data.data?.id ||
-    data.response?.task_id ||
-    data.response?.id ||
-    data.result?.task_id ||
-    data.result?.id
-  )?.toString();
-}
-
 function getAgnesUnsupportedVideoInputs(params: {
   imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }>;
   videoRefs?: string[];
@@ -547,82 +561,31 @@ async function callAgnesVideoApi(
     videoResolution,
   });
 
-  const submitResponse = await corsFetch(submitUrl, {
-    method: 'POST',
-    headers: {
+  const pollUrl = /\/v\d+$/.test(baseUrl) ? `${baseUrl}/videos/{taskId}` : `${baseUrl}/v1/videos/{taskId}`;
+  const contentUrl = /\/v\d+$/.test(baseUrl) ? `${baseUrl}/videos/{taskId}/content` : `${baseUrl}/v1/videos/{taskId}/content`;
+
+  return runBackendVideoTask({
+    provider: 'Agnes',
+    model,
+    route: '/v1/videos',
+    label: `agnes-video:${model}`,
+    submitUrl,
+    submitHeaders: {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
-    body: JSON.stringify(requestBody),
+    submitBody: JSON.stringify(requestBody),
+    pollUrl,
+    pollHeaders: {
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    fallbackUrl: contentUrl,
+    intervalMs: 5000,
+    onProgress,
     signal,
   });
-
-  if (!submitResponse.ok) {
-    const errorText = await submitResponse.text();
-    console.error('[VideoGen] Agnes video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
-      provider: 'Agnes',
-      model,
-      route: '/v1/videos',
-    });
-  }
-
-  const submitData = await submitResponse.json();
-  console.log('[VideoGen] Agnes submit response:', submitData);
-
-  const directUrl = extractVideoUrl(submitData);
-  if (directUrl) return directUrl;
-
-  const taskId = getAgnesVideoTaskId(submitData);
-  if (!taskId) throw new Error('Agnes 视频接口返回空任务 ID');
-
-  const pollUrl = /\/v\d+$/.test(baseUrl) ? `${baseUrl}/videos/${taskId}` : `${baseUrl}/v1/videos/${taskId}`;
-  const pollInterval = 5000;
-  const maxAttempts = 180;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
-    await sleepOrAbort(pollInterval, signal);
-
-    const statusResponse = await corsFetch(pollUrl, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      signal,
-    });
-
-    if (!statusResponse.ok) {
-      if (statusResponse.status === 404) throw new Error('Agnes 视频任务不存在');
-      console.warn('[VideoGen] Agnes query failed:', statusResponse.status);
-      continue;
-    }
-
-    const statusData = await statusResponse.json();
-    console.log(`[VideoGen] Agnes task ${taskId} status:`, statusData);
-    const status = String(statusData.status || statusData.state || statusData.data?.status || '').toLowerCase();
-
-    if (status === 'completed' || status === 'succeeded' || status === 'success') {
-      const videoUrl =
-        extractVideoUrl(statusData) ||
-        normalizeUrl(statusData.content?.video_url) ||
-        normalizeUrl(statusData.output?.video_url) ||
-        normalizeUrl(statusData.output?.url) ||
-        normalizeUrl(statusData.data?.video_url) ||
-        normalizeUrl(statusData.data?.url) ||
-        normalizeUrl(/\/v\d+$/.test(baseUrl) ? `${baseUrl}/videos/${taskId}/content` : `${baseUrl}/v1/videos/${taskId}/content`);
-      if (!videoUrl) throw new Error('Agnes 视频任务完成但没有视频 URL');
-      return videoUrl;
-    }
-
-    if (status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled') {
-      throw new Error(statusData.error?.message || statusData.error || statusData.message || 'Agnes 视频生成失败');
-    }
-  }
-
-  throw new Error('Agnes 视频生成超时');
 }
 
 async function callUnifiedVideoApi(
@@ -696,88 +659,27 @@ async function callUnifiedVideoApi(
   const submitUrl = `${rootBase}${endpointPaths.submit}`;
   console.log(`[VideoGen] Unified format → POST ${endpointPaths.submit}`, { model, metadata, hasImage: !!firstFrame?.url });
 
-  // 提交：直接使用端点类型对应的 URL
-  const resp = await corsFetch(submitUrl, {
-    method: 'POST',
-    headers: {
+  return runBackendVideoTask({
+    provider: '统一视频接口',
+    model,
+    route: endpointPaths.submit,
+    label: `video:${model}`,
+    submitUrl,
+    submitHeaders: {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
-    body: JSON.stringify(body),
+    submitBody: JSON.stringify(body),
+    pollUrl: `${rootBase}${endpointPaths.poll('{taskId}')}`,
+    pollHeaders: {
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    intervalMs: 5000,
+    onProgress,
+    signal,
   });
-  if (!resp.ok) {
-    const errorText = await resp.text();
-    handleVideoSubmitError(resp.status, errorText, keyManager, {
-      provider: '统一视频接口',
-      model,
-      route: endpointPaths.submit,
-    });
-  }
-  const submitData = await resp.json();
-
-  console.log('[VideoGen] Unified submit response:', submitData);
-
-  // 提取任务 ID（覆盖各平台的嵌套响应格式）
-  const taskId = (
-    submitData.task_id ||
-    submitData.id ||
-    submitData.request_id ||
-    submitData.data?.task_id ||
-    submitData.data?.id ||
-    submitData.response?.task_id ||
-    submitData.response?.id ||
-    submitData.result?.task_id ||
-    submitData.result?.id ||
-    submitData.output?.task_id ||
-    submitData.output?.id
-  )?.toString();
-
-  // 某些模型直接返回结果
-  const directUrl = extractVideoUrl(submitData);
-  if (directUrl) return directUrl;
-  if (!taskId) {
-    console.error('[VideoGen] Cannot extract taskId from submit response:', JSON.stringify(submitData).substring(0, 300));
-    throw new Error(`返回空的任务 ID（响应格式未识别，请检查控制台日志）`);
-  }
-
-  // 轮询：直接使用端点类型对应的 URL
-  const pollUrl = `${rootBase}${endpointPaths.poll(taskId)}`;
-  const pollInterval = 5000;
-  const maxAttempts = 180;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
-    await sleepOrAbort(pollInterval, signal);
-
-    const statusResponse = await corsFetch(pollUrl, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      signal,
-    });
-
-    if (!statusResponse.ok) continue;
-
-    const statusData = await statusResponse.json();
-    console.log(`[VideoGen] Unified task ${taskId} status:`, statusData);
-
-    const status = String(statusData.status || statusData.state || statusData.data?.status || '').toLowerCase();
-
-    if (status === 'completed' || status === 'succeeded' || status === 'success') {
-      const videoUrl = extractVideoUrl(statusData);
-      if (!videoUrl) throw new Error('任务完成但没有视频 URL');
-      return videoUrl;
-    }
-
-    if (status === 'failed' || status === 'error' || status === 'cancelled') {
-      const errorMsg = statusData.error?.message || statusData.error || statusData.message || '视频生成失败';
-      throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
-    }
-  }
-  throw new Error('视频生成超时');
 }
 
 // ==================== Volcengine 豆包/Seedance 格式 ====================
@@ -829,8 +731,7 @@ async function callVolcVideoApi(
   };
 
   const formatFetchError = (error: unknown): string => {
-    const message = error instanceof Error ? error.message : String(error);
-    return message;
+    return normalizeNetworkErrorMessage(error, '视频生成请求');
   };
 
   // 图片内容（首帧/尾帧）
@@ -882,164 +783,56 @@ async function callVolcVideoApi(
     imageInputMode: imageWithRoles.some(i => i.url) ? 'base64_data_uri' : 'none',
   });
 
-  const submitTask = async (structuredPrompt: boolean): Promise<unknown> => {
-    let submitResponse: Response;
+  const runVolcTask = async (structuredPrompt: boolean): Promise<string> => {
     try {
-      submitResponse = await corsFetch(taskUrls.submit, {
-        method: 'POST',
-        headers: {
+      return await runBackendVideoTask({
+        provider: officialArk ? '火山方舟' : 'Volc 兼容中转',
+        model,
+        route: taskUrls.routeLabel,
+        label: `volc-video:${model}`,
+        submitUrl: taskUrls.submit,
+        submitHeaders: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
           'Authorization': `Bearer ${apiKey}`,
         },
-        body: JSON.stringify(buildRequestBody(prompt, structuredPrompt)),
+        submitBody: JSON.stringify(buildRequestBody(prompt, structuredPrompt)),
+        pollUrl: taskUrls.poll('{taskId}'),
+        pollHeaders: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        intervalMs: 5000,
+        onProgress,
+        signal,
+        parse: {
+          statusPaths: ['status', 'data.status', 'output.status'],
+          resultUrlPaths: [
+            'content.video_url',
+            'content.0.video_url',
+            'outputs.0.url',
+            'output.video_url',
+            'output.url',
+            'video_url',
+            'url',
+          ],
+          errorPaths: ['error.message', 'error.code', 'message', 'data.error.message', 'data.error'],
+          successStatuses: ['succeeded', 'success', 'completed'],
+          failureStatuses: ['failed', 'error', 'expired', 'cancelled', 'canceled'],
+        },
       });
     } catch (error) {
-      throw createProviderError({
-        mediaKind: 'video',
-        stage: 'submit',
-        provider: officialArk ? '火山方舟' : 'Volc 兼容中转',
-        model,
-        route: taskUrls.routeLabel,
-        originalError: new Error(formatFetchError(error)),
-      });
-    }
-
-    if (!submitResponse.ok) {
-      const errorText = await submitResponse.text();
-      if (!structuredPrompt && shouldRetryWithStructuredCaptionPrompt(errorText)) {
+      const detail = formatFetchError(error);
+      if (!structuredPrompt && shouldRetryWithStructuredCaptionPrompt(detail)) {
         console.warn('[VideoGen] Volc requires structured caption prompt; retrying once with style_caption JSON');
-        return submitTask(true);
+        return runVolcTask(true);
       }
-      console.error('[VideoGen] Volc video submit error:', submitResponse.status, errorText);
-      handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
-        provider: officialArk ? '火山方舟' : 'Volc 兼容中转',
-        model,
-        route: taskUrls.routeLabel,
-      });
+      throw error;
     }
-
-    const data = await submitResponse.json();
-    if (!structuredPrompt && (data.status === 'failed' || data.status === 'error')) {
-      const proxyMsg = JSON.stringify(data);
-      if (shouldRetryWithStructuredCaptionPrompt(proxyMsg)) {
-        console.warn('[VideoGen] Volc requires structured caption prompt; retrying once with style_caption JSON');
-        return submitTask(true);
-      }
-    }
-    return data;
   };
 
-  const submitData = await submitTask(false) as any;
-  console.log('[VideoGen] Volc submit response:', JSON.stringify(submitData).substring(0, 500));
-
-  // 检测代理包装的业务级错误（HTTP 200 但 body.status 为 failed/error）
-  // 典型场景：OpenAI 兼容中转 中转将上游 451（内容审核）等错误包装为 {status: "failed", message: "..."}
-  if (submitData.status === 'failed' || submitData.status === 'error') {
-    const proxyMsg = submitData.message || submitData.error?.message || '视频提交失败（代理返回业务错误）';
-    console.error('[VideoGen] Volc: proxy-wrapped business error:', proxyMsg);
-    // 尝试从错误信息中提取原始 HTTP 状态码
-    const statusMatch = proxyMsg.match(/status\s+(\d+)/);
-    const inferredStatus = statusMatch ? parseInt(statusMatch[1]) : 400;
-    handleVideoSubmitError(inferredStatus, JSON.stringify(submitData), keyManager, {
-      provider: officialArk ? '火山方舟' : 'Volc 兼容中转',
-      model,
-      route: taskUrls.routeLabel,
-    });
-  }
-
-  // 提取任务 ID（兼容多种响应格式）
-  // OpenAI 兼容中转 中转: { id: "cgt-..." }  /  原生火山方舟: { id: "01973..." }
-  // 也兼容 response.* / result.* 嵌套格式
-  const taskId = (
-    submitData.id ||
-    submitData.task_id ||
-    submitData.request_id ||
-    submitData.data?.id ||
-    submitData.data?.task_id ||
-    submitData.response?.task_id ||
-    submitData.response?.id ||
-    submitData.result?.task_id ||
-    submitData.result?.id ||
-    submitData.output?.task_id ||
-    submitData.output?.id
-  )?.toString();
-
-  if (!taskId) {
-    console.error('[VideoGen] Volc: cannot extract taskId. Full response:', JSON.stringify(submitData));
-    // 兜底：将代理返回的错误信息（如有）附加到异常中，避免信息丢失
-    const detail = submitData.message || submitData.error?.message || '';
-    throw new Error(detail || `doubao-seedance 返回空的任务 ID（响应格式未识别，请检查控制台日志）`);
-  }
-
-  // 轮询: GET /contents/generations/tasks/{taskId} 或兼容中转 /volc/v1/contents/generations/tasks/{taskId}
-  const pollInterval = 5000;
-  const maxAttempts = 180; // 15分钟
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
-
-    let statusResponse: Response;
-    try {
-      statusResponse = await corsFetch(
-        taskUrls.poll(taskId),
-        {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-          },
-          signal,
-        },
-      );
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      console.warn('[VideoGen] Volc query network failed, continuing poll:', formatFetchError(error));
-      await sleepOrAbort(pollInterval, signal);
-      continue;
-    }
-
-    if (!statusResponse.ok) {
-      if (statusResponse.status === 404) throw new Error('任务不存在');
-      console.warn('[VideoGen] Volc query failed:', statusResponse.status);
-      await sleepOrAbort(pollInterval, signal);
-      continue;
-    }
-
-    const statusData = await statusResponse.json();
-    console.log(`[VideoGen] Volc task ${taskId} status:`, statusData);
-
-    // Volcengine 状态: queued | running | succeeded | failed | expired | cancelled
-    const status = (statusData.status ?? 'unknown').toString().toLowerCase();
-
-    if (status === 'succeeded') {
-      // 兼容多种响应格式提取视频 URL
-      const videoUrl =
-        normalizeUrl(statusData.content?.video_url) ||      // OpenAI 兼容中转 中转格式
-        normalizeUrl(Array.isArray(statusData.content) ? statusData.content[0]?.video_url : undefined) ||
-        normalizeUrl(Array.isArray(statusData.outputs) ? statusData.outputs[0]?.url : undefined) ||
-        normalizeUrl(statusData.output?.video_url) ||       // 原生火山方舟格式
-        normalizeUrl(statusData.output?.url) ||
-        normalizeUrl(statusData.video_url) ||
-        normalizeUrl(statusData.url) ||
-        extractVideoUrl(statusData);
-      if (!videoUrl) {
-        console.error('[VideoGen] Volc: task succeeded but no video URL. statusData:', JSON.stringify(statusData));
-        throw new Error('任务完成但没有视频 URL');
-      }
-      return videoUrl;
-    }
-
-    if (status === 'failed' || status === 'expired' || status === 'cancelled') {
-      const errorMsg = statusData.error?.message || statusData.error?.code || '视频生成失败';
-      throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
-    }
-
-    // queued / running → 继续轮询
-    await sleepOrAbort(pollInterval, signal);
-  }
-  throw new Error('视频生成超时');
+  return runVolcTask(false);
 }
 
 // ==================== 通义万象 wan 格式 ====================
@@ -1078,77 +871,31 @@ async function callWanVideoApi(
 
   console.log('[VideoGen] Wan format → POST /alibailian/api/v1/services/aigc/video-generation/video-synthesis', { model });
 
-  const submitResponse = await corsFetch(
-    `${baseUrl}/alibailian/api/v1/services/aigc/video-generation/video-synthesis`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(requestBody),
+  return runBackendVideoTask({
+    provider: '通义万相',
+    model,
+    route: '/alibailian/api/v1/services/aigc/video-generation/video-synthesis',
+    label: `wan-video:${model}`,
+    submitUrl: `${baseUrl}/alibailian/api/v1/services/aigc/video-generation/video-synthesis`,
+    submitHeaders: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
     },
-  );
-
-  if (!submitResponse.ok) {
-    const errorText = await submitResponse.text();
-    console.error('[VideoGen] Wan video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
-      provider: '通义万相',
-      model,
-      route: '/alibailian/api/v1/services/aigc/video-generation/video-synthesis',
-    });
-  }
-
-  const submitData = await submitResponse.json();
-  console.log('[VideoGen] Wan submit response:', submitData);
-
-  // 百炼响应: { request_id, output: { task_id, task_status: "PENDING" } }
-  const taskId = submitData.output?.task_id;
-  if (!taskId) throw new Error('返回空的任务 ID');
-
-  // 轮询: GET /alibailian/api/v1/tasks/{task_id}
-  const pollInterval = 5000;
-  const maxAttempts = 180;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
-
-    const statusResponse = await corsFetch(
-      `${baseUrl}/alibailian/api/v1/tasks/${taskId}`,
-      {
-        method: 'GET',
-        headers: { 'Authorization': `Bearer ${apiKey}` },
-        signal,
-      },
-    );
-
-    if (!statusResponse.ok) {
-      if (statusResponse.status === 404) throw new Error('任务不存在');
-      console.warn('[VideoGen] Wan query failed:', statusResponse.status);
-      await sleepOrAbort(pollInterval, signal);
-      continue;
-    }
-
-    const statusData = await statusResponse.json();
-    console.log(`[VideoGen] Wan task ${taskId} status:`, statusData);
-
-    // 百炼响应: { output: { task_status: "SUCCEEDED", video_url: "..." } }
-    const taskStatus = (statusData.output?.task_status ?? '').toUpperCase();
-
-    if (taskStatus === 'SUCCEEDED') {
-      const videoUrl = normalizeUrl(statusData.output?.video_url);
-      if (!videoUrl) throw new Error('任务完成但没有视频 URL');
-      return videoUrl;
-    }
-
-    if (taskStatus === 'FAILED') {
-      throw new Error(statusData.output?.message || statusData.output?.error || '视频生成失败');
-    }
-
-    await sleepOrAbort(pollInterval, signal);
-  }
-  throw new Error('视频生成超时');
+    submitBody: JSON.stringify(requestBody),
+    pollUrl: `${baseUrl}/alibailian/api/v1/tasks/{taskId}`,
+    pollHeaders: { 'Authorization': `Bearer ${apiKey}` },
+    intervalMs: 5000,
+    onProgress,
+    signal,
+    parse: {
+      taskIdPaths: ['output.task_id', 'task_id', 'id'],
+      statusPaths: ['output.task_status', 'status'],
+      resultUrlPaths: ['output.video_url', 'video_url', 'url'],
+      errorPaths: ['output.message', 'output.error', 'message', 'error'],
+      successStatuses: ['succeeded', 'success', 'completed'],
+      failureStatuses: ['failed', 'error'],
+    },
+  });
 }
 
 // ==================== Kling 可灵全系列格式 ====================
@@ -1216,77 +963,35 @@ async function callKlingVideoApi(
   const submitUrl = `${baseUrl}/kling/v1/videos/${endpointPath}`;
   console.log('[VideoGen] Kling format →', endpointPath, { model, submitUrl });
 
-  const submitResponse = await corsFetch(submitUrl, {
-    method: 'POST',
-    headers: {
+  return runBackendVideoTask({
+    provider: 'Kling',
+    model,
+    route: `/kling/v1/videos/${endpointPath}`,
+    label: `kling-video:${model}`,
+    submitUrl,
+    submitHeaders: {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
-    body: JSON.stringify(requestBody),
+    submitBody: JSON.stringify(requestBody),
+    pollUrl: `${baseUrl}/kling/v1/videos/${endpointPath}/{taskId}`,
+    pollHeaders: {
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    intervalMs: 5000,
+    onProgress,
+    signal,
+    parse: {
+      taskIdPaths: ['data.task_id', 'task_id', 'id'],
+      statusPaths: ['data.task_status', 'status'],
+      resultUrlPaths: ['data.task_result.videos.0.url', 'data.task_result.video_url', 'data.video_url', 'video_url', 'url'],
+      errorPaths: ['data.task_status_msg', 'message', 'error'],
+      successStatuses: ['succeed', 'success', 'completed', 'succeeded'],
+      failureStatuses: ['failed', 'error'],
+    },
   });
-
-  if (!submitResponse.ok) {
-    const errorText = await submitResponse.text();
-    console.error('[VideoGen] Kling video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
-      provider: 'Kling',
-      model,
-      route: `/kling/v1/videos/${endpointPath}`,
-    });
-  }
-
-  const submitData = await submitResponse.json();
-  console.log('[VideoGen] Kling submit response:', submitData);
-
-  // Kling 响应: { code, message, data: { task_id, task_status } }
-  const taskId = submitData.data?.task_id;
-  if (!taskId) throw new Error('返回空的任务 ID');
-
-  // 轮询 URL 镜像提交路径: GET /kling/v1/videos/{path}/{task_id}
-  const pollUrl = `${baseUrl}/kling/v1/videos/${endpointPath}/${taskId}`;
-  const pollInterval = 5000;
-  const maxAttempts = 180;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
-    await sleepOrAbort(pollInterval, signal);
-
-    const statusResponse = await corsFetch(pollUrl, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      signal,
-    });
-
-    if (!statusResponse.ok) {
-      if (statusResponse.status === 404) throw new Error('任务不存在');
-      console.warn('[VideoGen] Kling query failed:', statusResponse.status);
-      continue;
-    }
-
-    const statusData = await statusResponse.json();
-    console.log(`[VideoGen] Kling task ${taskId} status:`, statusData);
-
-    // Kling 响应: { data: { task_status: "succeed", task_result: { videos: [{ url }] } } }
-    const taskStatus = (statusData.data?.task_status ?? '').toLowerCase();
-
-    if (taskStatus === 'succeed' || taskStatus === 'success' || taskStatus === 'completed') {
-      const videoUrl =
-        normalizeUrl(statusData.data?.task_result?.videos?.[0]?.url) ||
-        normalizeUrl(statusData.data?.task_result?.video_url) ||
-        extractVideoUrl(statusData);
-      if (!videoUrl) throw new Error('任务完成但没有视频 URL');
-      return videoUrl;
-    }
-
-    if (taskStatus === 'failed' || taskStatus === 'error') {
-      throw new Error(statusData.data?.task_status_msg || statusData.message || '视频生成失败');
-    }
-  }
-  throw new Error('视频生成超时');
 }
 
 // ==================== OpenAI 官方视频格式 (sora-2) ====================
@@ -1314,72 +1019,29 @@ async function callOpenAIOfficialVideoApi(
   keyManager?: { handleError: (status: number, errorText?: string) => boolean },
   signal?: AbortSignal,
 ): Promise<string> {
-  const form = new FormData();
-  form.append('model', model);
-  form.append('prompt', prompt);
-  form.append('size', toSoraSize(aspectRatio, videoResolution));
-  form.append('seconds', String(duration || 10));
-
   const submitUrl = `${baseUrl}/v1/videos`;
   console.log('[VideoGen] OpenAI Official format → POST /v1/videos', { model, size: toSoraSize(aspectRatio, videoResolution) });
 
-  const submitResponse = await corsFetch(submitUrl, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}` },
-    body: form,
+  return runBackendVideoTask({
+    provider: 'OpenAI 官方视频',
+    model,
+    route: '/v1/videos',
+    label: `openai-video:${model}`,
+    submitUrl,
+    submitHeaders: { 'Authorization': `Bearer ${apiKey}` },
+    submitFormData: [
+      { name: 'model', value: model },
+      { name: 'prompt', value: prompt },
+      { name: 'size', value: toSoraSize(aspectRatio, videoResolution) },
+      { name: 'seconds', value: String(duration || 10) },
+    ],
+    pollUrl: `${baseUrl}/v1/videos/{taskId}`,
+    pollHeaders: { 'Authorization': `Bearer ${apiKey}` },
+    fallbackUrl: `${baseUrl}/v1/videos/{taskId}/content`,
+    intervalMs: 5000,
+    onProgress,
+    signal,
   });
-
-  if (!submitResponse.ok) {
-    const errorText = await submitResponse.text();
-    console.error('[VideoGen] Sora video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
-      provider: 'OpenAI 官方视频',
-      model,
-      route: '/v1/videos',
-    });
-  }
-
-  const submitData = await submitResponse.json();
-  console.log('[VideoGen] Sora submit response:', submitData);
-
-  const taskId = (submitData.id || submitData.video_id)?.toString();
-  const directUrl = extractVideoUrl(submitData);
-  if (directUrl) return directUrl;
-  if (!taskId) throw new Error('Sora 返回空任务 ID');
-
-  // 轮询: GET /v1/videos/{taskId}
-  const pollUrl = `${baseUrl}/v1/videos/${taskId}`;
-  const pollInterval = 5000;
-  const maxAttempts = 180;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
-    await sleepOrAbort(pollInterval, signal);
-
-    const statusResponse = await corsFetch(pollUrl, {
-      method: 'GET',
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-      signal,
-    });
-
-    if (!statusResponse.ok) continue;
-
-    const statusData = await statusResponse.json();
-    console.log(`[VideoGen] Sora task ${taskId} status:`, statusData);
-
-    const status = String(statusData.status || '').toLowerCase();
-
-    if (status === 'completed' || status === 'succeeded' || status === 'success') {
-      const videoUrl = extractVideoUrl(statusData) || normalizeUrl(`${baseUrl}/v1/videos/${taskId}/content`);
-      if (!videoUrl) throw new Error('Sora 任务完成但没有视频 URL');
-      return videoUrl;
-    }
-
-    if (status === 'failed' || status === 'error') {
-      throw new Error(statusData.error?.message || statusData.error || statusData.message || 'Sora 生成失败');
-    }
-  }
-  throw new Error('Sora 生成超时');
 }
 
 // ==================== Replicate 视频格式 ====================
@@ -1415,67 +1077,28 @@ async function callReplicateVideoApi(
   const submitUrl = `${rootBase}/replicate/v1/predictions`;
   console.log('[VideoGen] Replicate format → POST /replicate/v1/predictions', { model });
 
-  const submitResponse = await corsFetch(submitUrl, {
-    method: 'POST',
-    headers: {
+  return runBackendVideoTask({
+    provider: 'Replicate',
+    model,
+    route: '/replicate/v1/predictions',
+    label: `replicate-video:${model}`,
+    submitUrl,
+    submitHeaders: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ model, input }),
+    submitBody: JSON.stringify({ model, input }),
+    pollUrl: `${rootBase}/replicate/v1/predictions/{taskId}`,
+    pollHeaders: { 'Authorization': `Bearer ${apiKey}` },
+    intervalMs: 5000,
+    onProgress,
+    signal,
+    parse: {
+      successStatuses: ['succeeded', 'completed', 'success'],
+      failureStatuses: ['failed', 'error', 'canceled', 'cancelled'],
+      errorPaths: ['error', 'message'],
+    },
   });
-
-  if (!submitResponse.ok) {
-    const errorText = await submitResponse.text();
-    console.error('[VideoGen] Replicate video submit error:', submitResponse.status, errorText);
-    handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
-      provider: 'Replicate',
-      model,
-      route: '/replicate/v1/predictions',
-    });
-  }
-
-  const submitData = await submitResponse.json();
-  console.log('[VideoGen] Replicate submit response:', submitData);
-
-  const directUrl = extractVideoUrl(submitData);
-  if (directUrl) return directUrl;
-
-  const predictionId = submitData.id?.toString();
-  if (!predictionId) throw new Error('Replicate 返回空 prediction ID');
-
-  // 轮询: GET /replicate/v1/predictions/{id}
-  const pollUrl = `${rootBase}/replicate/v1/predictions/${predictionId}`;
-  const pollInterval = 5000;
-  const maxAttempts = 180;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
-    await sleepOrAbort(pollInterval, signal);
-
-    const statusResponse = await corsFetch(pollUrl, {
-      method: 'GET',
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-      signal,
-    });
-
-    if (!statusResponse.ok) continue;
-
-    const statusData = await statusResponse.json();
-    console.log(`[VideoGen] Replicate prediction ${predictionId} status:`, statusData);
-
-    const status = String(statusData.status || '').toLowerCase();
-
-    if (status === 'succeeded') {
-      const videoUrl = extractVideoUrl(statusData);
-      if (!videoUrl) throw new Error('Replicate 成功但未返回视频 URL');
-      return videoUrl;
-    }
-
-    if (status === 'failed' || status === 'canceled') {
-      throw new Error(statusData.error || 'Replicate 视频生成失败');
-    }
-  }
-  throw new Error('Replicate 视频生成超时');
 }
 
 // Save video to local and return the local URL
@@ -1729,105 +1352,27 @@ export async function callJuxinVideoGenerationApi(
   
   console.log('[VideoGen] Grok request:', requestBody);
 
-  // Submit video generation request（带重试，覆盖 429/503/529，每次重试动态取 key）
-  const submitData = await retryOperation(async () => {
-    // 每次重试动态取当前 key，利用 keyManager rotate 后的新 key
-    const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
-    const submitResponse = await corsFetch(`${apiBaseUrl}/v1/video/create`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${currentApiKey}`,
-      },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!submitResponse.ok) {
-      const errorText = await submitResponse.text();
-      console.error('[VideoGen] Grok video error:', submitResponse.status, errorText);
-      handleVideoSubmitError(submitResponse.status, errorText, keyManager, {
-        provider: 'Grok',
-        model,
-        route: '/v1/video/create',
-      });
-    }
-
-    return submitResponse.json();
-  }, {
-    maxRetries: 3,
-    baseDelay: 3000,
-    retryOn429: true,
-    onRetry: (attempt, delay) => {
-      console.warn(`[VideoGen][Grok] Retryable error, retrying in ${delay}ms... (Attempt ${attempt}/3)`);
+  const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
+  return runBackendVideoTask({
+    provider: 'Grok',
+    model,
+    route: '/v1/video/create',
+    label: `grok-video:${model}`,
+    submitUrl: `${apiBaseUrl}/v1/video/create`,
+    submitHeaders: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${currentApiKey}`,
     },
+    submitBody: JSON.stringify(requestBody),
+    pollUrl: `${apiBaseUrl}/v1/video/query?id={taskId}`,
+    pollHeaders: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${currentApiKey}`,
+    },
+    intervalMs: 5000,
+    onProgress,
+    signal,
   });
-  console.log('[VideoGen] Grok submit response:', submitData);
-
-  // Extract task ID from response
-  const taskId = submitData.id;
-  if (!taskId) {
-    throw new Error('Grok API 返回空的任务 ID');
-  }
-
-  console.log('[VideoGen] Grok task ID:', taskId);
-
-  // Poll for completion
-  const pollInterval = 5000; // 5 seconds for Grok (longer video generation)
-  const maxAttempts = 180; // 15 minutes max
-  
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const progress = Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99);
-    onProgress?.(progress);
-
-    // Query task status
-    const queryUrl = new URL(`${apiBaseUrl}/v1/video/query`);
-    queryUrl.searchParams.set('id', taskId);
-
-    const statusResponse = await corsFetch(queryUrl.toString(), {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      signal,
-    });
-
-    if (!statusResponse.ok) {
-      if (statusResponse.status === 404) {
-        throw new Error('任务不存在');
-      }
-      console.warn('[VideoGen] Grok query failed:', statusResponse.status);
-      await sleepOrAbort(pollInterval, signal);
-      continue;
-    }
-
-    const statusData = await statusResponse.json();
-    console.log(`[VideoGen] Grok task ${taskId} status:`, statusData);
-
-    const status = (statusData.status ?? 'unknown').toString().toLowerCase();
-
-    if (status === 'completed' || status === 'succeeded' || status === 'success') {
-      // Extract video URL
-      const videoUrl = statusData.video_url || statusData.result_url || statusData.url;
-      
-      if (!videoUrl) {
-        throw new Error('任务完成但没有视频 URL');
-      }
-      
-      console.log('[VideoGen] Grok video completed:', videoUrl);
-      return videoUrl;
-    }
-
-    if (status === 'failed' || status === 'error') {
-      const errorMsg = statusData.error || statusData.error_message || '视频生成失败';
-      throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
-    }
-
-    // Status is pending/processing, continue polling
-    await sleepOrAbort(pollInterval, signal);
-  }
-  
-  throw new Error('视频生成超时');
 }

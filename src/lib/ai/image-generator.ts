@@ -12,7 +12,7 @@ import { retryOperation } from '@/lib/utils/retry';
 import { resolveImageApiFormat } from '@/lib/api-key-manager';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { corsFetch } from '@/lib/cors-fetch';
-import { createProviderError, throwUpstreamResponseError } from '@/lib/ai/provider-errors';
+import { createProviderError } from '@/lib/ai/provider-errors';
 import {
   isAgnesImageModel,
   isAgnesProvider,
@@ -21,6 +21,12 @@ import {
 } from '@/lib/ai/provider-platforms';
 import { getUserScopedMediaCategory } from '@/lib/user-session';
 import { mediaUrlToBlob, mediaUrlToDataUrl, normalizeImageDataUrlForApi } from '@/lib/media-url-resolver';
+import {
+  defaultGenerationParse,
+  getBackendTaskResultUrl,
+  runBackendGenerationTask,
+  type BackendGenerationTaskInput,
+} from '@/lib/backend-generation-task';
 
 export interface ImageGenerationParams {
   prompt: string;
@@ -61,6 +67,61 @@ const IMAGE_REQUEST_TIMEOUT_LABEL = '10分钟';
 const IMAGE_REQUEST_TIMEOUT_MESSAGE = `图片生成请求超时（${IMAGE_REQUEST_TIMEOUT_LABEL}），请检查网络后重试`;
 const IMAGE_POLL_INTERVAL_MS = 2000;
 const IMAGE_POLL_MAX_ATTEMPTS = IMAGE_REQUEST_TIMEOUT_MS / IMAGE_POLL_INTERVAL_MS;
+
+function buildImageStorageKey(model?: string): string {
+  const safeModel = (model || 'image').replace(/[^\w.-]+/g, '_').slice(0, 60) || 'image';
+  return `${getUserScopedMediaCategory('shots')}/generated_${safeModel}_${Date.now()}.png`;
+}
+
+async function runBackendImageTask(params: {
+  model?: string;
+  label: string;
+  submitUrl: string;
+  submitHeaders: Record<string, string>;
+  submitBody: string;
+  pollUrl?: string;
+  pollHeaders?: Record<string, string>;
+  signal?: AbortSignal;
+  onProgress?: (progress: number) => void;
+  parse?: BackendGenerationTaskInput['parse'];
+}): Promise<{ imageUrl?: string; taskId?: string; pollUrl?: string }> {
+  const task = await runBackendGenerationTask({
+    kind: 'image',
+    label: params.label,
+    submit: {
+      url: params.submitUrl,
+      method: 'POST',
+      headers: params.submitHeaders,
+      body: params.submitBody,
+    },
+    poll: params.pollUrl ? {
+      url: params.pollUrl,
+      method: 'GET',
+      headers: params.pollHeaders || params.submitHeaders,
+      intervalMs: IMAGE_POLL_INTERVAL_MS,
+    } : undefined,
+    parse: {
+      ...defaultGenerationParse('image'),
+      ...params.parse,
+    },
+    result: {
+      mediaKind: 'image',
+      storageKey: buildImageStorageKey(params.model),
+    },
+  }, {
+    signal: params.signal,
+    intervalMs: IMAGE_POLL_INTERVAL_MS,
+    onProgress: (progress) => params.onProgress?.(progress),
+  });
+
+  const imageUrl = getBackendTaskResultUrl(task);
+  if (!imageUrl) throw new Error('后端图片任务完成但没有图片 URL');
+  return {
+    imageUrl,
+    taskId: task.upstreamTaskId,
+    pollUrl: params.pollUrl,
+  };
+}
 
 function getImageEndpointPaths(endpointTypes: string[]): { submit: string; poll: (id: string) => string } {
   for (const t of endpointTypes) {
@@ -261,6 +322,17 @@ async function imageReferenceToBlob(value: string, index: number): Promise<{ blo
   };
 }
 
+async function blobToBase64Payload(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
 type ImageKeyManager = {
   getCurrentKey?: () => string | null;
   handleError?: (status: number, errorText?: string) => boolean;
@@ -371,33 +443,6 @@ function extractOfficialImageFields(
     if (value) return value;
   }
   return null;
-}
-
-function getOfficialImageTaskId(data: unknown): string | undefined {
-  const record = asImageResponseRecord(data);
-  if (!record) return undefined;
-  const dataField = record.data;
-  const firstItem = Array.isArray(dataField) ? dataField[0] : dataField;
-  const firstItemRecord = asImageResponseRecord(firstItem);
-  return getStringishField(firstItemRecord, 'task_id')
-    || getStringishField(firstItemRecord, 'id')
-    || getStringishField(record, 'task_id')
-    || getStringishField(record, 'id');
-}
-
-function extractOfficialImagesApiImage(data: unknown, outputFormat: unknown): string | null {
-  const record = asImageResponseRecord(data);
-  if (!record) return null;
-  const dataField = record.data;
-  const firstItem = Array.isArray(dataField) ? dataField[0] : dataField;
-  const firstItemRecord = asImageResponseRecord(firstItem);
-  if (!firstItemRecord) return null;
-
-  const imageUrl = extractOfficialImageFields(firstItemRecord, outputFormat, [
-    'b64_json',
-    'url',
-  ], 'Images API data[0]');
-  return imageUrl;
 }
 
 function extractResponsesImageItem(item: unknown, responseId?: string): ResponsesImageResult | null {
@@ -851,12 +896,7 @@ async function generateImage(
     return { imageUrl: result.imageUrl };
   }
 
-  if (result.taskId) {
-    const imageUrl = await pollTaskStatus(result.taskId, apiKey, baseUrl, undefined, result.pollUrl);
-    return { imageUrl, taskId: result.taskId };
-  }
-
-  throw new Error('Invalid API response');
+  throw new Error('后端图片任务未返回图片 URL');
 }
 
 /**
@@ -945,76 +985,67 @@ async function submitOfficialOpenAIImageTask(params: {
     referenceCount: referenceImages?.length || 0,
   });
 
-  const data = await retryOperation(async () => {
-    const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
-    if (signal?.aborted) throw new Error('用户已取消');
+  const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
+  const submitHeaders = hasReferenceImages
+    ? { 'Authorization': `Bearer ${currentApiKey}` }
+    : { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` };
 
-    let response: Response;
-    if (hasReferenceImages) {
-      const form = new FormData();
-      Object.entries(imageOptions).forEach(([key, value]) => {
-        if (value !== undefined && value !== null) form.append(key, String(value));
-      });
-      form.append('prompt', prompt);
-
-      const blobs = await Promise.all(referenceImages!.map((image, index) => imageReferenceToBlob(image, index)));
-      for (const { blob, filename } of blobs) {
-        form.append('image', blob, filename);
-      }
-
-      response = await corsFetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${currentApiKey}`,
-        },
-        body: form,
-        signal,
-      });
-    } else {
-      response = await corsFetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${currentApiKey}`,
-        },
-        body: JSON.stringify({
-          ...imageOptions,
-          prompt,
-        }),
-        signal,
+  let submitBody: string | undefined;
+  let submitFormData: BackendGenerationTaskInput['submit']['formData'] | undefined;
+  if (hasReferenceImages) {
+    submitFormData = [];
+    Object.entries(imageOptions).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) submitFormData!.push({ name: key, value: String(value) });
+    });
+    submitFormData.push({ name: 'prompt', value: prompt });
+    const blobs = await Promise.all(referenceImages!.map((image, index) => imageReferenceToBlob(image, index)));
+    for (const { blob, filename } of blobs) {
+      submitFormData.push({
+        name: 'image',
+        fileName: filename,
+        mimeType: blob.type || 'image/png',
+        dataBase64: await blobToBase64Payload(blob),
       });
     }
-
-    const text = await response.text();
-    if (!response.ok) {
-      handleImageHttpError(response.status, text, keyManager, {
-        provider: 'OpenAI 官方图片',
-        model,
-        route: endpoint,
-      });
-    }
-
-    try {
-      return text ? JSON.parse(text) : {};
-    } catch {
-      throw new Error(`无法解析官方图片 API 响应: ${text.substring(0, 120)}`);
-    }
-  }, {
-    maxRetries: 3,
-    baseDelay: 3000,
-    retryOn429: true,
-    onRetry: (attempt, delay, error) => {
-      console.warn(`[ImageGenerator] Official Images API retry ${attempt}, delay ${delay}ms, error: ${error.message}`);
-    },
-  });
-
-  const imageUrl = extractOfficialImagesApiImage(data, imageOptions.output_format);
-  const taskId = getOfficialImageTaskId(data);
-  if (!imageUrl && !taskId) {
-    throw new Error('官方图片 API 响应缺少 data[0].b64_json 或 data[0].url');
+  } else {
+    submitBody = JSON.stringify({
+      ...imageOptions,
+      prompt,
+    });
   }
 
-  return { imageUrl: imageUrl || undefined, taskId };
+  const task = await runBackendGenerationTask({
+    kind: 'image',
+    label: `official-image:${model}`,
+    submit: {
+      url: endpoint,
+      method: 'POST',
+      headers: submitHeaders,
+      body: submitBody,
+      formData: submitFormData,
+    },
+    poll: {
+      url: buildEndpoint(baseUrl, 'images/generations/{taskId}'),
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${currentApiKey}`,
+        'Cache-Control': 'no-cache',
+      },
+      intervalMs: IMAGE_POLL_INTERVAL_MS,
+    },
+    parse: defaultGenerationParse('image'),
+    result: {
+      mediaKind: 'image',
+      storageKey: buildImageStorageKey(model),
+    },
+  }, {
+    signal,
+    intervalMs: IMAGE_POLL_INTERVAL_MS,
+  });
+
+  const imageUrl = getBackendTaskResultUrl(task);
+  if (!imageUrl) throw new Error('官方图片 API 响应缺少 data[0].b64_json 或 data[0].url');
+  return { imageUrl, taskId: task.upstreamTaskId };
 }
 
 /**
@@ -1473,188 +1504,25 @@ async function submitImageTask(
     hasAgnesImage: !!requestData.image,
   });
 
-  try {
-    const data = await retryOperation(async () => {
-      // 每次重试独立创建 AbortController，避免共享 controller 在重试时已超时
-      const controller = new AbortController();
-      const timeoutId = setTimeout(
-        () => controller.abort(new DOMException(IMAGE_REQUEST_TIMEOUT_MESSAGE, 'TimeoutError')),
-        IMAGE_REQUEST_TIMEOUT_MS
-      );
-
-      // 每次重试动态取当前 key（利用 keyManager rotate 后的新 key）
-      const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
-      const imagePaths = getImageEndpointPaths(endpointTypes || []);
-      const rootBase = getRootBaseUrl(baseUrl);
-      const endpoint = `${rootBase}${imagePaths.submit}`;
-      try {
-        const response = await corsFetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${currentApiKey}`,
-          },
-          body: JSON.stringify(requestData),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error('[ImageGenerator] API error:', response.status, errorText);
-          handleImageHttpError(response.status, errorText, keyManager, {
-            provider: providerPlatform,
-            model,
-            route: endpoint,
-          });
-        }
-
-        const text = await response.text();
-        try {
-          return JSON.parse(text);
-        } catch {
-          // Fallback: some providers return SSE format "data: {...}" even with stream:false
-          const sseMatch = text.match(/^data:\s*(\{.+\})/m);
-          if (sseMatch) {
-            return JSON.parse(sseMatch[1]);
-          }
-          throw new Error(`无法解析图片 API 响应: ${text.substring(0, 100)}`);
-        }
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    }, {
-      maxRetries: 3,
-      baseDelay: 3000,
-      retryOn429: true,
-      onRetry: (attempt, delay) => {
-        console.warn(`[ImageGenerator] Retryable error, retrying in ${delay}ms... (Attempt ${attempt}/3)`);
-      },
-    });
-    console.log('[ImageGenerator] API response:', data);
-
-    // GPT Image 返回 choices 格式（OpenAI 兼容中转 文档确认）
-    if (data.choices?.[0]?.message?.content) {
-      const content = data.choices[0].message.content;
-      // 可能是 markdown 图片链接
-      const mdMatch = content.match(/!\[.*?\]\((https?:\/\/[^)]+)\)/);
-      if (mdMatch) return { imageUrl: mdMatch[1] };
-      // 可能是 base64
-      const b64Match = content.match(/(data:image\/[^;]+;base64,[A-Za-z0-9+/=]+)/);
-      if (b64Match) return { imageUrl: b64Match[1] };
-      // 可能直接是 URL
-      const urlMatch = content.match(/(https?:\/\/[^\s"']+\.(?:png|jpg|jpeg|webp|gif)[^\s"']*)/i);
-      if (urlMatch) return { imageUrl: urlMatch[1] };
-    }
-
-    // 标准格式: { data: [{ url }] }
-    let taskId: string | undefined;
-    const dataList = data.data;
-    if (Array.isArray(dataList) && dataList.length > 0) {
-      // 直接返回 URL（doubao-seedream、DALL-E 等同步模型）
-      if (dataList[0].url) return { imageUrl: dataList[0].url };
-      if (dataList[0].b64_json) return { imageUrl: normalizeBase64Image(dataList[0].b64_json)! };
-      taskId = dataList[0].task_id?.toString();
-    }
-    taskId = taskId || data.task_id?.toString();
-
-    if (!taskId) {
-      const directUrl = data.data?.[0]?.url || data.url;
-      if (directUrl) return { imageUrl: directUrl };
-      throw new Error('No task_id or image URL in response');
-    }
-
-    // 返回 pollUrl 供调用方使用自定义轮询路径
-    const imagePaths = getImageEndpointPaths(endpointTypes || []);
-    const rootBase = getRootBaseUrl(baseUrl);
-    const pollUrl = `${rootBase}${imagePaths.poll(taskId)}`;
-    return { taskId, pollUrl };
-  } catch (error) {
-    if (error instanceof Error) {
-      if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-        throw new Error(error.message || IMAGE_REQUEST_TIMEOUT_MESSAGE);
-      }
-      throw error;
-    }
-    throw new Error('调用图片生成 API 时发生未知错误');
-  }
-}
-
-/**
- * Poll task status until completion
- */
-async function pollTaskStatus(
-  taskId: string,
-  apiKey: string,
-  baseUrl: string,
-  onProgress?: (progress: number) => void,
-  customPollUrl?: string,
-): Promise<string> {
-  const maxAttempts = IMAGE_POLL_MAX_ATTEMPTS;
-  const pollInterval = IMAGE_POLL_INTERVAL_MS;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const progress = Math.min(Math.floor((attempt / maxAttempts) * 100), 99);
-    onProgress?.(progress);
-
-    try {
-      const rawUrl = customPollUrl || buildEndpoint(baseUrl, `images/generations/${taskId}`);
-      const url = new URL(rawUrl);
-      url.searchParams.set('_ts', Date.now().toString());
-
-      const response = await corsFetch(url.toString(), {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Cache-Control': 'no-cache',
-        },
-      });
-
-      if (!response.ok) {
-        await throwUpstreamResponseError(response);
-      }
-
-      const data = await response.json();
-      console.log(`[ImageGenerator] Task ${taskId} status:`, data);
-
-      const status = (data.status ?? data.data?.status ?? 'unknown').toString().toLowerCase();
-      const statusMap: Record<string, string> = {
-        'pending': 'pending', 'submitted': 'pending', 'queued': 'pending',
-        'processing': 'processing', 'running': 'processing', 'in_progress': 'processing',
-        'completed': 'completed', 'succeeded': 'completed', 'success': 'completed',
-        'failed': 'failed', 'error': 'failed',
-      };
-      const mappedStatus = statusMap[status] || 'processing';
-
-      if (mappedStatus === 'completed') {
-        onProgress?.(100);
-        const images = data.result?.images ?? data.data?.result?.images;
-        let resultUrl: string | undefined;
-        if (images?.[0]) {
-          const urlField = images[0].url;
-          resultUrl = Array.isArray(urlField) ? urlField[0] : urlField;
-        }
-        resultUrl = resultUrl || data.output_url || data.result_url || data.url;
-        if (!resultUrl) throw new Error('Task completed but no URL in result');
-        return resultUrl;
-      }
-
-      if (mappedStatus === 'failed') {
-        const rawError = data.error || data.error_message || data.data?.error;
-        throw new Error(rawError ? String(rawError) : 'Task failed');
-      }
-
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
-    } catch (error) {
-      if (error instanceof Error && 
-          (error.message.includes('Task failed') || error.message.includes('no URL') || error.message.includes('Task not found'))) {
-        throw error;
-      }
-      console.error(`[ImageGenerator] Poll attempt ${attempt} failed:`, error);
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
-    }
-  }
-
-  throw new Error('图片生成超时');
+  const imagePaths = getImageEndpointPaths(endpointTypes || []);
+  const rootBase = getRootBaseUrl(baseUrl);
+  const endpoint = `${rootBase}${imagePaths.submit}`;
+  const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
+  return runBackendImageTask({
+    model,
+    label: `image:${model || 'unknown'}`,
+    submitUrl: endpoint,
+    submitHeaders: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${currentApiKey}`,
+    },
+    submitBody: JSON.stringify(requestData),
+    pollUrl: `${rootBase}${imagePaths.poll('{taskId}')}`,
+    pollHeaders: {
+      'Authorization': `Bearer ${currentApiKey}`,
+      'Cache-Control': 'no-cache',
+    },
+  });
 }
 
 /**
@@ -1676,6 +1544,8 @@ export async function submitGridImageRequest(params: {
   keyManager?: { getCurrentKey: () => string | null; handleError: (status: number, errorText?: string) => boolean };
   /** 外部中止信号，用于停止生成时真正取消网络请求 */
   signal?: AbortSignal;
+  /** 后端任务进度回调 */
+  onProgress?: (progress: number) => void;
 }): Promise<{ imageUrl?: string; taskId?: string; pollUrl?: string }> {
   const { model, prompt, apiKey, baseUrl, aspectRatio, resolution, referenceImages, keyManager, signal, extraParams } = params;
   const normalizedModel = (model || '').trim();
@@ -1762,88 +1632,24 @@ export async function submitGridImageRequest(params: {
 
   console.log('[GridImageAPI] Submitting to', endpoint);
 
-  const data = await retryOperation(async () => {
-    // 每次重试动态取当前 key（利用 keyManager rotate 后的新 key）
-    const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
-    if (signal?.aborted) throw new Error('用户已取消');
-    const response = await corsFetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${currentApiKey}`,
-      },
-      body: JSON.stringify(requestBody),
-      signal,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      handleImageHttpError(response.status, errorText, keyManager, {
-        provider: params.providerPlatform,
-        model: normalizedModel,
-        route: endpoint,
-      });
-    }
-
-    return response.json();
-  }, {
-    maxRetries: 3,
-    baseDelay: 3000,
-    retryOn429: true,
+  const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
+  return runBackendImageTask({
+    model: normalizedModel,
+    label: `grid-image:${normalizedModel}`,
+    submitUrl: endpoint,
+    submitHeaders: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${currentApiKey}`,
+    },
+    submitBody: JSON.stringify(requestBody),
+    pollUrl: `${rootBase}${imagePaths.poll('{taskId}')}`,
+    pollHeaders: {
+      'Authorization': `Bearer ${currentApiKey}`,
+      'Cache-Control': 'no-cache',
+    },
+    signal,
+    onProgress: params.onProgress,
   });
-  console.log('[GridImageAPI] Response received');
-
-  // GPT Image 可能通过 images/generations 返回 choices 格式
-  if (data.choices?.[0]?.message?.content) {
-    const content = data.choices[0].message.content;
-    const mdMatch = content.match(/!\[.*?\]\((https?:\/\/[^)]+)\)/);
-    if (mdMatch) return { imageUrl: mdMatch[1] };
-    const b64Match = content.match(/(data:image\/[^;]+;base64,[A-Za-z0-9+/=]+)/);
-    if (b64Match) return { imageUrl: b64Match[1] };
-    const urlMatch = content.match(/(https?:\/\/[^\s"']+\.(?:png|jpg|jpeg|webp|gif)[^\s"']*)/i);
-    if (urlMatch) return { imageUrl: urlMatch[1] };
-  }
-
-  // 标准格式: { data: [{ url, task_id }] }
-  const normalizeUrl = (url: any): string | undefined => {
-    if (!url) return undefined;
-    if (Array.isArray(url)) return url[0] || undefined;
-    if (typeof url === 'string') return url;
-    return undefined;
-  };
-
-  const dataField = data.data;
-  const firstItem = Array.isArray(dataField) ? dataField[0] : dataField;
-
-  const imageUrl = normalizeUrl(firstItem?.url)
-    || normalizeUrl(firstItem?.image_url)
-    || normalizeUrl(firstItem?.output_url)
-    || normalizeBase64Image(firstItem?.b64_json)
-    || normalizeUrl(data.url)
-    || normalizeUrl(data.image_url)
-    || normalizeUrl(data.output_url)
-    || normalizeBase64Image(data.b64_json);
-
-  const taskId = firstItem?.task_id?.toString()
-    || firstItem?.id?.toString()
-    || data.task_id?.toString()
-    || data.id?.toString();
-
-  // 如果只有 taskId 没有 imageUrl，自动轮询获取结果（与 generateImage 行为一致）
-  if (!imageUrl && taskId) {
-    console.log('[GridImageAPI] Got taskId without imageUrl, polling...', taskId);
-    const pollUrl = `${rootBase}${imagePaths.poll(taskId)}`;
-    const polledUrl = await pollTaskStatus(taskId, params.keyManager?.getCurrentKey?.() || apiKey, normalizedBase, undefined, pollUrl);
-    return { imageUrl: polledUrl, taskId };
-  }
-
-  // taskId 存在时附带 pollUrl 供外部轮询
-  if (taskId) {
-    const pollUrl = `${rootBase}${imagePaths.poll(taskId)}`;
-    return { imageUrl, taskId, pollUrl };
-  }
-
-  return { imageUrl, taskId };
 }
 
 /**
@@ -1870,62 +1676,25 @@ async function submitViaKlingImages(
 
   console.log('[ImageGenerator] Kling image →', nativePath, { model });
 
-  const data = await retryOperation(async () => {
-    const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
-    const response = await corsFetch(`${rootBase}/${nativePath}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      handleImageHttpError(response.status, errText, keyManager, {
-        provider: 'Kling',
-        model,
-        route: `${rootBase}/${nativePath}`,
-      });
-    }
-
-    return response.json();
-  }, {
-    maxRetries: 3,
-    baseDelay: 3000,
-    retryOn429: true,
-    onRetry: (attempt, delay) => {
-      console.warn(`[ImageGenerator] Kling image retry ${attempt}, delay ${delay}ms`);
+  const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
+  const result = await runBackendImageTask({
+    model,
+    label: `kling-image:${model}`,
+    submitUrl: `${rootBase}/${nativePath}`,
+    submitHeaders: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentApiKey}` },
+    submitBody: JSON.stringify(body),
+    pollUrl: `${rootBase}/${nativePath}/{taskId}`,
+    pollHeaders: { 'Authorization': `Bearer ${currentApiKey}` },
+    parse: {
+      taskIdPaths: ['data.task_id', 'task_id', 'id'],
+      statusPaths: ['data.task_status', 'status'],
+      resultUrlPaths: ['data.task_result.images.0.url', 'data.0.url', 'image_url', 'url'],
+      errorPaths: ['data.task_status_msg', 'message', 'error'],
+      successStatuses: ['succeed', 'success', 'completed', 'succeeded'],
+      failureStatuses: ['failed', 'error'],
     },
   });
-
-  const directUrl = data.data?.[0]?.url;
-  if (directUrl) return { imageUrl: directUrl };
-
-  const taskId = data.data?.task_id;
-  if (!taskId) throw new Error('Kling image 返回空任务 ID');
-
-  const pollUrl = `${rootBase}/${nativePath}/${taskId}`;
-  const pollInterval = 2000;
-  const maxAttempts = 60;
-
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(r => setTimeout(r, pollInterval));
-    const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
-    const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${currentApiKey}` },
-    });
-    if (!pollResp.ok) continue;
-    const pollData = await pollResp.json();
-    const status = String(pollData.data?.task_status || '').toLowerCase();
-    if (status === 'succeed' || status === 'success' || status === 'completed') {
-      const imageUrl = pollData.data?.task_result?.images?.[0]?.url;
-      if (!imageUrl) throw new Error('Kling image 成功但无图片 URL');
-      return { imageUrl, taskId: String(taskId) };
-    }
-    if (status === 'failed' || status === 'error') {
-      throw new Error(pollData.data?.task_status_msg || 'Kling image 生成失败');
-    }
-  }
-  throw new Error('Kling image 生成超时');
+  return { imageUrl: result.imageUrl!, taskId: result.taskId };
 }
 
 /**

@@ -128,10 +128,12 @@ export function SettingsPanel() {
     storagePaths,
     cacheSettings,
     updateSettings,
+    backendPolling,
     setResourceSharing,
     setStoragePaths,
     setCacheSettings,
     setUpdateSettings,
+    setBackendPolling,
   } = useAppSettingsStore();
   const { activeProjectId } = useProjectStore();
   const { assignProjectToUnscoped: assignCharactersToProject } = useCharacterLibraryStore();
@@ -397,7 +399,11 @@ export function SettingsPanel() {
       assignCharactersToProject(activeProjectId);
     }
     // Rehydrate to load/unload other projects' data
-    try { await useCharacterLibraryStore.persist.rehydrate(); } catch {}
+    try {
+      await useCharacterLibraryStore.persist.rehydrate();
+    } catch (error) {
+      console.warn('[SettingsPanel] Character library rehydrate failed:', error);
+    }
   };
 
   const handleToggleShareScenes = async (checked: boolean) => {
@@ -405,7 +411,11 @@ export function SettingsPanel() {
     if (!checked && activeProjectId) {
       assignScenesToProject(activeProjectId);
     }
-    try { await useSceneStore.persist.rehydrate(); } catch {}
+    try {
+      await useSceneStore.persist.rehydrate();
+    } catch (error) {
+      console.warn('[SettingsPanel] Scene store rehydrate failed:', error);
+    }
   };
 
   const handleToggleShareMedia = async (checked: boolean) => {
@@ -413,7 +423,11 @@ export function SettingsPanel() {
     if (!checked && activeProjectId) {
       assignMediaToProject(activeProjectId);
     }
-    try { await useMediaStore.persist.rehydrate(); } catch {}
+    try {
+      await useMediaStore.persist.rehydrate();
+    } catch (error) {
+      console.warn('[SettingsPanel] Media store rehydrate failed:', error);
+    }
   };
 
   // Unified storage handlers
@@ -1357,6 +1371,37 @@ export function SettingsPanel() {
                   <p className="text-xs text-muted-foreground">
                     💡 选择包含 projects/ 和 media/ 子目录的数据目录，操作后重启应用。
                   </p>
+                </div>
+              </div>
+
+              {/* Backend Generation Tasks */}
+              <div className="p-6 border border-border rounded-xl bg-card space-y-4">
+                <h4 className="font-medium text-foreground flex items-center gap-2">
+                  <Zap className="h-4 w-4" />
+                  后端生成任务
+                </h4>
+
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium">最长轮询时间</p>
+                    <p className="text-xs text-muted-foreground">
+                      创建生图或生视频任务后，由后端继续查询上游进度并缓存结果
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={backendPolling.maxDurationMinutes}
+                      onChange={(e) => {
+                        const minutes = Math.max(1, Math.min(60, parseInt(e.target.value) || 10));
+                        setBackendPolling({ maxDurationMinutes: minutes });
+                      }}
+                      className="w-20"
+                    />
+                    <span className="text-xs text-muted-foreground">分钟</span>
+                  </div>
                 </div>
               </div>
 

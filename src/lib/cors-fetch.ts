@@ -9,6 +9,8 @@
  * - 跨域 HTTP(S) 请求 → 通过 /__api_proxy 或 VITE_WEB_API_PROXY_URL 代理转发
  */
 
+import { normalizeNetworkErrorMessage } from '@/lib/network-error';
+
 const nativeFetch = globalThis.fetch?.bind(globalThis);
 const GUARDED_FETCH_MARKER = '__moyinCreatorGuardedFetch';
 
@@ -49,11 +51,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 function getFriendlyFetchFailure(error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  if (/^failed to fetch$/i.test(detail) || /^load failed$/i.test(detail) || /networkerror/i.test(detail)) {
-    return '浏览器网络层无法连通目标地址，常见原因是代理服务不可用、目标服务不可达、CORS/预检失败或浏览器拦截。';
-  }
-  return detail || '未知网络错误';
+  return normalizeNetworkErrorMessage(error, '网络请求');
 }
 
 function createDirectFetchError(targetUrl: string, init: RequestInit | undefined, error: unknown): Error {

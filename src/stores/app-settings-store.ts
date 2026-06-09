@@ -23,12 +23,16 @@ export interface UpdateSettings {
   autoCheckEnabled: boolean;
   ignoredVersion: string;
 }
+export interface BackendPollingSettings {
+  maxDurationMinutes: number;
+}
 
 interface AppSettingsState {
   resourceSharing: ResourceSharingSettings;
   storagePaths: StoragePathSettings;
   cacheSettings: CacheSettings;
   updateSettings: UpdateSettings;
+  backendPolling: BackendPollingSettings;
 }
 
 interface AppSettingsActions {
@@ -36,6 +40,7 @@ interface AppSettingsActions {
   setStoragePaths: (paths: Partial<StoragePathSettings>) => void;
   setCacheSettings: (settings: Partial<CacheSettings>) => void;
   setUpdateSettings: (settings: Partial<UpdateSettings>) => void;
+  setBackendPolling: (settings: Partial<BackendPollingSettings>) => void;
 }
 
 const defaultState: AppSettingsState = {
@@ -54,6 +59,9 @@ const defaultState: AppSettingsState = {
   updateSettings: {
     autoCheckEnabled: false,
     ignoredVersion: "",
+  },
+  backendPolling: {
+    maxDurationMinutes: 10,
   },
 };
 
@@ -76,6 +84,10 @@ export const useAppSettingsStore = create<AppSettingsState & AppSettingsActions>
       setUpdateSettings: (settings) =>
         set((state) => ({
           updateSettings: { ...state.updateSettings, ...settings },
+        })),
+      setBackendPolling: (settings) =>
+        set((state) => ({
+          backendPolling: { ...state.backendPolling, ...settings },
         })),
     }),
     {

@@ -3,8 +3,6 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { useCharacterLibraryStore } from "@/stores/character-library-store";
 import { getFeatureConfig } from "@/lib/ai/feature-router";
-import { corsFetch } from "@/lib/cors-fetch";
-import { throwUpstreamResponseError } from "@/lib/ai/provider-errors";
 import { imageUrlToBase64, submitGridImageRequest } from "@/lib/ai/image-generator";
 import { mediaUrlToDataUrl, prepareImageReferencesForApi } from "@/lib/media-url-resolver";
 import type { SplitScene, ShotSizeType } from "@/stores/director-store";
@@ -106,9 +104,10 @@ export async function callImageGenerationApi(
     aspectRatio,
     referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
     keyManager: imageKeyManager,
+    signal,
+    onProgress,
   });
 
-  // Direct URL result
   if (apiResult.imageUrl) {
     let finalImageUrl = apiResult.imageUrl;
     try {
@@ -119,73 +118,7 @@ export async function callImageGenerationApi(
     return { imageUrl: finalImageUrl, httpUrl: apiResult.imageUrl };
   }
 
-  // Poll for completion if async
-  const taskId = apiResult.taskId;
-  if (taskId) {
-    const pollInterval = 2000;
-    const maxAttempts = 60;
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      // 检查外部中止信号
-      if (signal?.aborted) throw new Error('用户已取消');
-
-      const progress = Math.min(Math.floor((attempt / maxAttempts) * 100), 99);
-      onProgress?.(progress);
-
-      const url = new URL(apiResult.pollUrl || `${imageBaseUrl}/v1/tasks/${taskId}`);
-      url.searchParams.set('_ts', Date.now().toString());
-
-      const statusResponse = await corsFetch(url.toString(), {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${apiKeyToUse}`,
-          'Cache-Control': 'no-cache',
-        },
-        signal,
-      });
-
-      if (!statusResponse.ok) {
-        await throwUpstreamResponseError(statusResponse);
-      }
-
-      const statusData = await statusResponse.json();
-      const status = (statusData.status ?? statusData.data?.status ?? 'unknown').toString().toLowerCase();
-
-      if (status === 'completed' || status === 'succeeded' || status === 'success') {
-        const images = statusData.result?.images ?? statusData.data?.result?.images;
-        let imageUrl: string | undefined;
-        if (images?.[0]) {
-          const rawUrl = images[0].url || images[0];
-          imageUrl = normalizeUrl(rawUrl);
-        }
-        imageUrl = imageUrl || normalizeUrl(statusData.output_url) || normalizeUrl(statusData.result_url) || normalizeUrl(statusData.url);
-
-        if (!imageUrl) throw new Error('任务完成但没有图片 URL');
-        
-        const httpUrl = imageUrl;
-        let finalImageUrl = imageUrl;
-        try {
-          finalImageUrl = await imageUrlToBase64(imageUrl);
-        } catch (e) {
-          console.warn('[ImageGen] Failed to convert to base64:', e);
-        }
-        return { imageUrl: finalImageUrl, httpUrl };
-      }
-
-      if (status === 'failed' || status === 'error') {
-        const errorMsg = statusData.error || statusData.message || statusData.data?.error || '图片生成失败';
-        throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
-      }
-
-      await new Promise<void>((resolve, reject) => {
-        const tid = setTimeout(resolve, pollInterval);
-        signal?.addEventListener('abort', () => { clearTimeout(tid); reject(new Error('用户已取消')); }, { once: true });
-      });
-    }
-    throw new Error('图片生成超时');
-  }
-
-  throw new Error('Invalid API response: no image URL or task ID');
+  throw new Error('后端图片任务完成但没有图片 URL');
 }
 
 // ===== Grid generation utilities =====

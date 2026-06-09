@@ -14,6 +14,7 @@ import {
 } from '@/lib/media-url-resolver';
 import { corsFetch } from '@/lib/cors-fetch';
 import { createProviderError } from '@/lib/ai/provider-errors';
+import { normalizeNetworkErrorMessage } from '@/lib/network-error';
 
 export type VideoApiFormat =
   | 'openai_official'
@@ -85,14 +86,13 @@ function normalizeProviderImageDataUrl(dataUrl: string, label: string, contentTy
     return normalizeImageDataUrlForApi(dataUrl);
   } catch (error) {
     const mimeType = contentType || dataUrl.match(/^data:([^;,]+)/i)?.[1] || 'unknown';
-    const message = error instanceof Error ? error.message : String(error);
+    const message = normalizeNetworkErrorMessage(error, `${label}图片解析`);
     throw new Error(`${label}返回的不是支持图片：content-type=${mimeType}，${message}`);
   }
 }
 
 function formatFetchError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message;
+  return normalizeNetworkErrorMessage(error, '视频媒体读取');
 }
 
 async function readProviderImageDataUrl(source: string, label: string): Promise<string> {
@@ -136,7 +136,7 @@ async function prepareImageAsDataUrl(
         inputMode: 'base64_data_uri',
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = normalizeNetworkErrorMessage(error, `${label}准备`);
       errors.push(message);
       console.warn(`[${context.logPrefix || 'VideoMediaPrep'}] image source conversion failed, trying fallback`, {
         label,

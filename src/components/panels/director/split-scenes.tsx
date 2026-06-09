@@ -10,8 +10,6 @@
 
 import React, { useState, useCallback, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
-import { corsFetch } from "@/lib/cors-fetch";
-import { throwUpstreamResponseError } from "@/lib/ai/provider-errors";
 import { Button } from "@/components/ui/button";
 import { 
   useDirectorStore, 
@@ -71,6 +69,7 @@ import { saveVideoToLocal } from '@/lib/image-storage';
 import { isDiscouragedExternalImageUrl, mediaUrlToDataUrl, prepareImageReferencesForApi, resolveImageToHttpUrl } from '@/lib/media-url-resolver';
 import { callVideoGenerationApi, extractLastFrameFromVideo, isContentModerationError } from './use-video-generation';
 import { persistSceneImage } from '@/lib/utils/image-persist';
+import { normalizeNetworkErrorMessage } from '@/lib/network-error';
 import {
   Select,
   SelectContent,
@@ -1088,14 +1087,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         logPrefix: 'QuadGrid',
       });
 
-      // Parse result helper（用于轮询阶段）
-      const normalizeUrl = (url: any): string | undefined => {
-        if (!url) return undefined;
-        if (Array.isArray(url)) return url[0] || undefined;
-        if (typeof url === 'string') return url;
-        return undefined;
-      };
-
       // 调用 API - 使用智能路由（自动选择 chat completions 或 images/generations）
       console.log('[QuadGrid] Calling API, model:', model);
       const apiResult = await submitGridImageRequest({
@@ -1113,46 +1104,9 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       });
 
       let gridImageUrl = apiResult.imageUrl;
-      let taskId = apiResult.taskId;
-
-      // Poll if async
-      if (!gridImageUrl && taskId) {
-        console.log('[QuadGrid] Polling task:', taskId);
-        const pollInterval = 2000;
-        const maxAttempts = 60;
-        
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          const statusUrl = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
-          statusUrl.searchParams.set('_ts', Date.now().toString());
-          
-          const statusResp = await corsFetch(statusUrl.toString(), {
-            headers: { 'Authorization': `Bearer ${apiKey}` },
-          });
-          
-          if (!statusResp.ok) throw new Error(`查询任务失败: ${statusResp.status}`);
-          
-          const statusData = await statusResp.json();
-          const status = (statusData.status ?? statusData.data?.status ?? '').toString().toLowerCase();
-          
-          if (status === 'completed' || status === 'succeeded' || status === 'success') {
-            const images = statusData.result?.images ?? statusData.data?.result?.images;
-            if (images?.[0]) {
-              gridImageUrl = normalizeUrl(images[0].url || images[0]);
-            }
-            gridImageUrl = gridImageUrl || normalizeUrl(statusData.output_url) || normalizeUrl(statusData.url);
-            break;
-          }
-          
-          if (status === 'failed' || status === 'error') {
-            throw new Error(statusData.error || '图片生成失败');
-          }
-          
-          await new Promise(r => setTimeout(r, pollInterval));
-        }
-      }
 
       if (!gridImageUrl) {
-        throw new Error('未获取到四宫格图片 URL');
+        throw new Error('后端四宫格任务完成但没有图片 URL');
       }
 
       console.log('[QuadGrid] Grid image URL:', gridImageUrl.substring(0, 80));
@@ -1735,6 +1689,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       }
     } catch (error) {
       const err = error as Error;
+      const errorMessage = normalizeNetworkErrorMessage(err, '视频生成');
 
       // 用户主动取消：abort() 触发的 AbortError 或自定义 '用户已取消'
       if (err.name === 'AbortError' || err.message === '用户已取消') {
@@ -1752,7 +1707,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         updateSplitSceneVideo(sceneId, {
           videoStatus: 'failed',
           videoProgress: 0,
-          videoError: `MODERATION_SKIPPED:${err.message}`,
+          videoError: `MODERATION_SKIPPED:${errorMessage}`,
         });
         toast.warning(`分镜 ${sceneId + 1} 因内容审核跳过`);
         console.log(`[SplitScenes] Scene ${sceneId} skipped due to content moderation`);
@@ -1761,9 +1716,9 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         updateSplitSceneVideo(sceneId, {
           videoStatus: 'failed',
           videoProgress: 0,
-          videoError: err.message,
+          videoError: errorMessage,
         });
-        toast.error(`分镜 ${sceneId + 1} 生成失败: ${err.message}`);
+        toast.error(`分镜 ${sceneId + 1} 生成失败: ${errorMessage}`);
       }
     } finally {
       if (videoAbortRef.current.get(sceneId) === videoController) {
@@ -1967,17 +1922,9 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           : (processedRefs.length > 0 ? processedRefs : undefined),
         keyManager,
         signal: imageSignal,
+        onProgress: (progress) => updateSplitSceneImageStatus(sceneId, { imageProgress: progress }),
       });
 
-      // Helper to normalize URL (handle array format) - used in poll responses
-      const normalizeUrlValue = (url: any): string | undefined => {
-        if (!url) return undefined;
-        if (Array.isArray(url)) return url[0] || undefined;
-        if (typeof url === 'string') return url;
-        return undefined;
-      };
-
-      // Direct URL result
       if (apiResult.imageUrl) {
         const persistResult = await persistSceneImage(apiResult.imageUrl, sceneId, 'first');
         updateSplitSceneImage(sceneId, persistResult.localPath, scene.width, scene.height, persistResult.httpUrl || undefined);
@@ -1986,73 +1933,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         return;
       }
 
-      // Async task - poll for completion
-      let taskId: string | undefined = apiResult.taskId;
-      console.log('[SplitScenes] Async task:', taskId);
-
-      // Poll for completion if we have a task ID
-      if (taskId) {
-        const pollInterval = 2000;
-        const maxAttempts = 60; // 2 minutes max
-        
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          const progress = Math.min(Math.floor((attempt / maxAttempts) * 100), 99);
-          updateSplitSceneImageStatus(sceneId, { imageProgress: progress });
-
-          const url = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
-          url.searchParams.set('_ts', Date.now().toString());
-
-          const statusResponse = await corsFetch(url.toString(), {
-            method: 'GET',
-            headers: {
-              'Authorization': `Bearer ${apiKey}`,
-              'Cache-Control': 'no-cache',
-            },
-            signal: imageSignal,
-          });
-
-          if (!statusResponse.ok) {
-            await throwUpstreamResponseError(statusResponse);
-          }
-
-          const statusData = await statusResponse.json();
-          const status = (statusData.status ?? statusData.data?.status ?? 'unknown').toString().toLowerCase();
-
-          if (status === 'completed' || status === 'succeeded' || status === 'success') {
-            // Extract image URL (normalize array format)
-            const images = statusData.result?.images ?? statusData.data?.result?.images;
-            let imageUrl: string | undefined;
-            if (images?.[0]) {
-              const rawUrl = images[0].url || images[0];
-              imageUrl = normalizeUrlValue(rawUrl);
-            }
-            imageUrl = imageUrl || normalizeUrlValue(statusData.output_url) || normalizeUrlValue(statusData.result_url) || normalizeUrlValue(statusData.url);
-
-            if (!imageUrl) throw new Error('任务完成但没有图片 URL');
-            
-            // 持久化到本地 + 图床
-            const persistResult = await persistSceneImage(imageUrl, sceneId, 'first');
-            updateSplitSceneImage(sceneId, persistResult.localPath, scene.width, scene.height, persistResult.httpUrl || undefined);
-            autoSaveImageToLibrary(sceneId, persistResult.localPath);
-            toast.success(`分镜 ${sceneId + 1} 图片生成完成，已保存到素材库`);
-            return;
-          }
-
-          if (status === 'failed' || status === 'error') {
-            const errorMsg = statusData.error || statusData.message || statusData.data?.error || '图片生成失败';
-            console.error('[SplitScenes] Task failed:', statusData);
-            throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
-          }
-
-          await new Promise<void>((resolve, reject) => {
-            const tid = setTimeout(resolve, pollInterval);
-            imageSignal.addEventListener('abort', () => { clearTimeout(tid); reject(new Error('用户已取消')); }, { once: true });
-          });
-        }
-        throw new Error('图片生成超时');
-      }
-
-      throw new Error('Invalid API response: no image URL or task ID');
+      throw new Error('后端首帧任务完成但没有图片 URL');
     } catch (error) {
       const err = error as Error;
 
@@ -2558,14 +2439,6 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         console.log(`[MergedGen] Ref[${i}] format:`, prefix + '...');
       });
       
-      // 解析结果辅助函数（用于轮询阶段）
-      const normalizeUrl = (url: any): string | undefined => {
-        if (!url) return undefined;
-        if (Array.isArray(url)) return url[0] || undefined;
-        if (typeof url === 'string') return url;
-        return undefined;
-      };
-      
       // 调用 API 生成九宫格图片 - 使用智能路由（自动选择 chat completions 或 images/generations）
       console.log('[MergedGen] Calling API with', apiReferenceImages.length, 'reference images, model:', model);
       const apiResult = await submitGridImageRequest({
@@ -2580,21 +2453,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           ? apiReferenceImages
           : (processedRefs.length > 0 ? processedRefs : undefined),
         keyManager,
-      });
-      
-      let gridImageUrl = apiResult.imageUrl;
-      let taskId = apiResult.taskId;
-      console.log('[MergedGen] API result: gridImageUrl=', gridImageUrl?.substring(0, 50), 'taskId=', taskId);
-      
-      // 如果是异步任务，轮询
-      if (!gridImageUrl && taskId) {
-        console.log('[MergedGen] Polling task:', taskId);
-        const pollInterval = 2000;
-        const maxAttempts = 90; // 3 分钟
-        
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          const progress = Math.min(10 + Math.floor((attempt / maxAttempts) * 80), 90);
-          // 根据任务类型更新各自的进度
+        onProgress: (progress) => {
           pageTasks.forEach(task => {
             if (task.type === 'end') {
               updateSplitSceneEndFrameStatus(task.scene.id, { endFrameProgress: progress });
@@ -2602,52 +2461,15 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
               updateSplitSceneImageStatus(task.scene.id, { imageProgress: progress });
             }
           });
-          
-          const statusUrl = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
-          statusUrl.searchParams.set('_ts', Date.now().toString());
-          
-          const statusResp = await corsFetch(statusUrl.toString(), {
-            headers: { 'Authorization': `Bearer ${apiKey}` },
-          });
-          
-          if (!statusResp.ok) throw new Error(`查询任务失败: ${statusResp.status}`);
-          
-          const statusData = await statusResp.json();
-          console.log(`[MergedGen] Task ${taskId} poll #${attempt}:`, JSON.stringify(statusData, null, 2).substring(0, 500));
-          
-          const status = (statusData.status ?? statusData.data?.status ?? '').toString().toLowerCase();
-          
-          if (status === 'completed' || status === 'succeeded' || status === 'success') {
-            // 尝试从多种路径获取图片 URL
-            const images = statusData.result?.images ?? statusData.data?.result?.images ?? statusData.images;
-            if (images?.[0]) {
-              gridImageUrl = normalizeUrl(images[0].url || images[0]);
-            }
-            gridImageUrl = gridImageUrl 
-              || normalizeUrl(statusData.output_url) 
-              || normalizeUrl(statusData.result_url)
-              || normalizeUrl(statusData.url)
-              || normalizeUrl(statusData.data?.url)
-              || normalizeUrl(statusData.result?.url);
-            console.log('[MergedGen] Task completed, gridImageUrl=', gridImageUrl?.substring(0, 80));
-            break;
-          }
-          
-          if (status === 'failed' || status === 'error') {
-            const errMsg = statusData.error || statusData.message || statusData.data?.error || '图片生成失败';
-            throw new Error(typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg));
-          }
-          
-          await new Promise(r => setTimeout(r, pollInterval));
-        }
-      }
-      
+        },
+      });
+
+      let gridImageUrl = apiResult.imageUrl;
+      console.log('[MergedGen] Backend task result: gridImageUrl=', gridImageUrl?.substring(0, 50));
+
       if (!gridImageUrl) {
         console.error('[MergedGen] 无法获取图片 URL, apiResult:', apiResult);
-        if (taskId) {
-          throw new Error(`九宫格生成超时（任务 ${taskId} 在 3 分钟内未完成），API 服务可能繁忙，请稍后重试`);
-        }
-        throw new Error('未获取到九宫格图片 URL，请检查 API 响应');
+        throw new Error('后端九宫格任务完成但没有图片 URL');
       }
       
       console.log('[MergedGen] Grid image URL:', gridImageUrl.substring(0, 80));
@@ -2870,13 +2692,15 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       resolution: storyboardConfig.resolution || '2K',
       referenceImages: preparedRefUrls.length > 0 ? preparedRefUrls : undefined,
       keyManager: mergedKeyManager,
+      onProgress: (progress) => {
+        if (isEndFrame) updateSplitSceneEndFrameStatus(sceneId, { endFrameProgress: progress });
+        else updateSplitSceneImageStatus(sceneId, { imageProgress: progress });
+      },
     });
 
-    const normalizeUrlValue = (url: any): string | undefined => Array.isArray(url) ? (url[0] || undefined) : (typeof url === 'string' ? url : undefined);
     let directUrl = apiResult.imageUrl;
-    let taskId: string | undefined = apiResult.taskId;
 
-    if (!taskId && !directUrl) {
+    if (!directUrl) {
       // 对非常规响应：尝试一次"无参考"重试（保持合并模式，不降级到单图通道）
       if (preparedRefUrls.length > 0 && strategy !== 'none') {
         const retryResult = await submitGridImageRequest({
@@ -2887,42 +2711,16 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           providerPlatform: platform,
           aspectRatio: aspect,
           keyManager: mergedKeyManager,
+          onProgress: (progress) => {
+            if (isEndFrame) updateSplitSceneEndFrameStatus(sceneId, { endFrameProgress: progress });
+            else updateSplitSceneImageStatus(sceneId, { imageProgress: progress });
+          },
         });
         directUrl = retryResult.imageUrl;
-        taskId = retryResult.taskId;
-      }
-      if (!taskId && !directUrl) throw new Error('Invalid image task response');
-    }
-
-    if (!directUrl && taskId) {
-      const pollInterval = 2000, maxAttempts = 60;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        // 检查合并生成是否已被用户停止
-        if (mergedAbortRef.current) {
-          console.log(`[MergedGen] Scene ${sceneId} polling cancelled by user`);
-          return;
-        }
-        const progress = Math.min(Math.floor((attempt / maxAttempts) * 100), 99);
-        if (isEndFrame) updateSplitSceneEndFrameStatus(sceneId, { endFrameProgress: progress });
-        else updateSplitSceneImageStatus(sceneId, { imageProgress: progress });
-        const url = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
-        url.searchParams.set('_ts', Date.now().toString());
-        const statusResp = await corsFetch(url.toString(), { method: 'GET', headers: { 'Authorization': `Bearer ${apiKeyToUse}`, 'Cache-Control': 'no-cache' } });
-        if (!statusResp.ok) await throwUpstreamResponseError(statusResp);
-        const statusData = await statusResp.json();
-        const status = (statusData.status ?? statusData.data?.status ?? 'unknown').toString().toLowerCase();
-        if (status === 'completed' || status === 'succeeded' || status === 'success') {
-          const images = statusData.result?.images ?? statusData.data?.result?.images;
-          if (images?.[0]) directUrl = normalizeUrlValue(images[0].url || images[0]);
-          directUrl = directUrl || normalizeUrlValue(statusData.output_url) || normalizeUrlValue(statusData.result_url) || normalizeUrlValue(statusData.url);
-          break;
-        }
-        if (status === 'failed' || status === 'error') throw new Error((statusData.error || statusData.message || 'image generation failed').toString());
-        await new Promise(r => setTimeout(r, pollInterval));
       }
     }
 
-    if (!directUrl) throw new Error('任务完成但没有图片 URL');
+    if (!directUrl) throw new Error('后端合并生图任务完成但没有图片 URL');
 
     const frameType = isEndFrame ? 'end' as const : 'first' as const;
     const persistResult = await persistSceneImage(directUrl, sceneId, frameType);
@@ -3062,17 +2860,9 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           : (processedRefs.length > 0 ? processedRefs : undefined),
         keyManager,
         signal: endFrameSignal,
+        onProgress: (progress) => updateSplitSceneEndFrameStatus(sceneId, { endFrameProgress: progress }),
       });
 
-      // Helper to normalize URL (handle array format) - used in poll responses
-      const normalizeUrlValue = (url: any): string | undefined => {
-        if (!url) return undefined;
-        if (Array.isArray(url)) return url[0] || undefined;
-        if (typeof url === 'string') return url;
-        return undefined;
-      };
-
-      // Direct URL result
       if (apiResult.imageUrl) {
         const persistResult = await persistSceneImage(apiResult.imageUrl, sceneId, 'end');
         updateSplitSceneEndFrame(sceneId, persistResult.localPath, 'ai-generated', persistResult.httpUrl);
@@ -3090,78 +2880,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         return;
       }
 
-      // Async task - poll for completion
-      let taskId: string | undefined = apiResult.taskId;
-      
-      if (taskId) {
-        const pollInterval = 2000;
-        const maxAttempts = 60;
-        
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          const progress = Math.min(Math.floor((attempt / maxAttempts) * 100), 99);
-          updateSplitSceneEndFrameStatus(sceneId, { endFrameProgress: progress });
-
-          const url = new URL(`${imageBaseUrl}/v1/tasks/${taskId}`);
-          url.searchParams.set('_ts', Date.now().toString());
-
-          const statusResponse = await corsFetch(url.toString(), {
-            method: 'GET',
-            headers: {
-              'Authorization': `Bearer ${apiKey}`,
-              'Cache-Control': 'no-cache',
-            },
-            signal: endFrameSignal,
-          });
-
-          if (!statusResponse.ok) {
-            await throwUpstreamResponseError(statusResponse);
-          }
-
-          const statusData = await statusResponse.json();
-          const status = (statusData.status ?? statusData.data?.status ?? 'unknown').toString().toLowerCase();
-
-          if (status === 'completed' || status === 'succeeded' || status === 'success') {
-            const images = statusData.result?.images ?? statusData.data?.result?.images;
-            let imageUrl: string | undefined;
-            if (images?.[0]) {
-              const rawUrl = images[0].url || images[0];
-              imageUrl = normalizeUrlValue(rawUrl);
-            }
-            imageUrl = imageUrl || normalizeUrlValue(statusData.output_url) || normalizeUrlValue(statusData.url);
-
-            if (!imageUrl) throw new Error('任务完成但没有图片 URL');
-            
-            // 持久化到本地 + 图床
-            const persistResult = await persistSceneImage(imageUrl, sceneId, 'end');
-            updateSplitSceneEndFrame(sceneId, persistResult.localPath, 'ai-generated', persistResult.httpUrl);
-            // 自动保存尾帧到素材库
-            const folderId = getImageFolderId();
-            addMediaFromUrl({
-              url: persistResult.localPath,
-              name: `分镜 ${sceneId + 1} - 尾帧`,
-              type: 'image',
-              source: 'ai-image',
-              folderId,
-              projectId: mediaProjectId,
-            });
-            toast.success(`分镜 ${sceneId + 1} 尾帧生成完成，已保存到素材库`);
-            return;
-          }
-
-          if (status === 'failed' || status === 'error') {
-            const errorMsg = statusData.error || statusData.message || '尾帧生成失败';
-            throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
-          }
-
-          await new Promise<void>((resolve, reject) => {
-            const tid = setTimeout(resolve, pollInterval);
-            endFrameSignal.addEventListener('abort', () => { clearTimeout(tid); reject(new Error('用户已取消')); }, { once: true });
-          });
-        }
-        throw new Error('尾帧生成超时');
-      }
-
-      throw new Error('Invalid API response');
+      throw new Error('后端尾帧任务完成但没有图片 URL');
     } catch (error) {
       const err = error as Error;
 

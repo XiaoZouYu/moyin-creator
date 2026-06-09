@@ -11,6 +11,7 @@
 import { corsFetch } from '@/lib/cors-fetch';
 import { readImageAsBase64 } from '@/lib/image-storage';
 import { getUserScopedMediaCategory } from '@/lib/user-session';
+import { normalizeNetworkErrorMessage } from '@/lib/network-error';
 
 export function normalizeMediaUrl(value: unknown): string {
   if (typeof value === 'string') return value.trim();
@@ -111,7 +112,7 @@ export async function mediaUrlToBlob(source: string): Promise<Blob> {
         return mediaUrlToBlob(localPath);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = normalizeNetworkErrorMessage(error, '后端媒体摄取');
       throw new Error(`后端媒体摄取失败：${message}`);
     }
   }
@@ -123,7 +124,7 @@ export async function mediaUrlToBlob(source: string): Promise<Blob> {
     }
     return response.blob();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = normalizeNetworkErrorMessage(error, '外部媒体读取');
     throw new Error(`外部媒体读取失败：${message}`);
   }
 }

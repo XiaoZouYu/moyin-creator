@@ -6,6 +6,7 @@ import { request as httpsRequest } from 'node:https'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import httpsProxyAgent from 'https-proxy-agent'
 import { handleCloudMediaRequest, handleCloudStorageRequest } from './cloud-storage.mjs'
+import { handleGenerationTaskRequest } from './generation-tasks.mjs'
 
 const { HttpsProxyAgent } = httpsProxyAgent
 
@@ -299,6 +300,11 @@ async function handleStatic(req, res) {
 const server = createServer((req, res) => {
   if ((req.url || '').startsWith('/__api_proxy')) {
     void handleProxy(req, res)
+    return
+  }
+
+  if ((req.url || '').startsWith('/__generation_tasks')) {
+    void handleGenerationTaskRequest(req, res)
     return
   }
 

@@ -14,7 +14,11 @@ import { retryOperation } from "@/lib/utils/retry";
 import { delay, RATE_LIMITS } from "@/lib/utils/rate-limiter";
 import { submitGridImageRequest } from '@/lib/ai/image-generator';
 import { corsFetch } from '@/lib/cors-fetch';
-import { throwUpstreamResponseError } from '@/lib/ai/provider-errors';
+import {
+  defaultGenerationParse,
+  getBackendTaskResultUrl,
+  runBackendGenerationTask,
+} from '@/lib/backend-generation-task';
 
 export interface StoryboardGenerationConfig {
   storyPrompt: string;
@@ -221,127 +225,6 @@ async function submitZhipuImageTask(
 }
 
 /**
- * Poll task status until completion
- * API: GET /v1/tasks/{task_id}
- * Response: data.result.images[0].url[0] for images
- */
-async function pollTaskCompletion(
-  taskId: string,
-  apiKey: string,
-  baseUrl: string,
-  onProgress?: (progress: number) => void,
-  type: 'image' | 'video' = 'image'
-): Promise<string> {
-  const maxAttempts = 120;
-  const pollInterval = 2000;
-
-  // Check for mock/sync tasks
-  if (taskId.startsWith('mock_') || taskId.startsWith('sync_')) {
-    return '';
-  }
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const progress = Math.min(Math.floor((attempt / maxAttempts) * 100), 99);
-    onProgress?.(progress);
-
-    try {
-      // Add cache-busting timestamp (matching director_ai)
-      // 浣跨敤浼犲叆鐨?baseUrl 鑰屼笉鏄‖缂栫爜
-      const url = new URL(buildEndpoint(baseUrl, `tasks/${taskId}`));
-      url.searchParams.set('_ts', Date.now().toString());
-
-      const response = await corsFetch(url.toString(), {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-        },
-      });
-
-      if (!response.ok) {
-        await throwUpstreamResponseError(response);
-      }
-
-      const data = await response.json();
-      console.log(`[StoryboardService] Task ${taskId} status:`, data);
-
-      // Parse status (matching director_ai)
-      const status = (data.status ?? data.data?.status ?? 'unknown').toString().toLowerCase();
-
-      // Map status
-      const statusMap: Record<string, string> = {
-        'pending': 'pending',
-        'submitted': 'pending',
-        'queued': 'pending',
-        'processing': 'processing',
-        'running': 'processing',
-        'in_progress': 'processing',
-        'completed': 'completed',
-        'succeeded': 'completed',
-        'success': 'completed',
-        'failed': 'failed',
-        'error': 'failed',
-      };
-
-      const mappedStatus = statusMap[status] || 'processing';
-
-      if (mappedStatus === 'completed') {
-        onProgress?.(100);
-        
-        // Extract result URL based on type (matching director_ai)
-        let resultUrl: string | undefined;
-        if (type === 'image') {
-          // Image result path: data.result.images[0].url[0] or data.result.images[0].url
-          const images = data.result?.images ?? data.data?.result?.images;
-          if (images?.[0]) {
-            const urlField = images[0].url;
-            resultUrl = Array.isArray(urlField) ? urlField[0] : urlField;
-          }
-        } else {
-          // Video result path: data.result.videos[0].url[0] or data.result.videos[0].url
-          const videos = data.result?.videos ?? data.data?.result?.videos;
-          if (videos?.[0]) {
-            const urlField = videos[0].url;
-            resultUrl = Array.isArray(urlField) ? urlField[0] : urlField;
-          }
-        }
-        // Fallback to direct URL fields
-        resultUrl = resultUrl || data.output_url || data.result_url || data.url;
-
-        if (!resultUrl) {
-          throw new Error('Task completed but no URL in result');
-        }
-        return resultUrl;
-      }
-
-      if (mappedStatus === 'failed') {
-        const rawError = data.error || data.error_message || data.data?.error;
-        const errorMsg = rawError 
-          ? (typeof rawError === 'string' ? rawError : JSON.stringify(rawError))
-          : 'Task failed';
-        throw new Error(errorMsg);
-      }
-
-      // Still processing, wait and continue
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
-    } catch (error) {
-      if (error instanceof Error && 
-          (error.message.includes('Task failed') || 
-           error.message.includes('Task completed') ||
-           error.message.includes('Task not found') ||
-           error.message.includes('no URL'))) {
-        throw error;
-      }
-      console.error(`[StoryboardService] Poll attempt ${attempt} failed:`, error);
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
-    }
-  }
-
-  throw new Error(`Task ${taskId} timed out after ${maxAttempts * pollInterval / 1000}s`);
-}
-
-/**
  * Generate a storyboard contact sheet image
  */
 export async function generateStoryboardImage(
@@ -414,9 +297,6 @@ export async function generateStoryboardImage(
 
   onProgress?.(10);
 
-  // Submit image generation task with smart API format routing
-  let result: { taskId?: string; imageUrl?: string; estimatedTime?: number };
-
   const baseUrl = config.baseUrl?.replace(/\/+$/, '');
   if (!baseUrl) {
     throw new Error('璇峰厛鍦ㄨ缃腑閰嶇疆鍥剧墖鐢熸垚鏈嶅姟鏄犲皠');
@@ -436,23 +316,13 @@ export async function generateStoryboardImage(
     aspectRatio,
     resolution,
     referenceImages: config.characterReferenceImages,
+    onProgress: (progress) => onProgress?.(10 + Math.floor(progress * 0.9)),
   });
 
   if (apiResult.imageUrl) {
-    result = { imageUrl: apiResult.imageUrl, estimatedTime: 0 };
-  } else if (apiResult.taskId) {
-    result = { taskId: apiResult.taskId, estimatedTime: 30 };
-  } else {
-    throw new Error('Invalid API response: no image URL or task ID');
-  }
-
-  onProgress?.(30);
-
-  // If image URL is returned directly (synchronous API)
-  if (result.imageUrl) {
     onProgress?.(100);
     return {
-      imageUrl: result.imageUrl,
+      imageUrl: apiResult.imageUrl,
       gridConfig: {
         cols: gridConfig.cols,
         rows: gridConfig.rows,
@@ -462,31 +332,7 @@ export async function generateStoryboardImage(
     };
   }
 
-  // If taskId is returned, poll for completion
-  if (result.taskId) {
-    // 浣跨敤涓庢彁浜や换鍔＄浉鍚岀殑 baseUrl 杩涜杞
-    const imageUrl = await pollTaskCompletion(
-      result.taskId,
-      apiKey,
-      baseUrl,
-      (progress) => {
-        onProgress?.(30 + Math.floor(progress * 0.7));
-      },
-      'image'
-    );
-
-    return {
-      imageUrl,
-      gridConfig: {
-        cols: gridConfig.cols,
-        rows: gridConfig.rows,
-        cellWidth: gridConfig.cellWidth,
-        cellHeight: gridConfig.cellHeight,
-      },
-    };
-  }
-
-  throw new Error('Invalid API response: no taskId or imageUrl');
+  throw new Error('后端故事板图片任务完成但没有图片 URL');
 }
 
 /**
@@ -500,8 +346,9 @@ async function submitVideoGenTask(
   referenceImages?: string[],
   model?: string,
   baseUrl?: string,
-  videoResolution?: '480p' | '720p' | '1080p'
-): Promise<{ taskId?: string; videoUrl?: string; estimatedTime?: number }> {
+  videoResolution?: '480p' | '720p' | '1080p',
+  onProgress?: (progress: number) => void,
+): Promise<{ videoUrl?: string; estimatedTime?: number }> {
   if (!model) {
     throw new Error('璇峰厛鍦ㄨ缃腑閰嶇疆瑙嗛鐢熸垚妯″瀷');
   }
@@ -547,68 +394,41 @@ async function submitVideoGenTask(
     imageRolesCount: roles.length,
   });
 
-  // Use retry wrapper for 429 rate limit handling
-  const data = await retryOperation(async () => {
-    const endpoint = buildEndpoint(actualBaseUrl, 'videos/generations');
-    const response = await corsFetch(endpoint, {
+  const endpoint = buildEndpoint(actualBaseUrl, 'videos/generations');
+  const task = await runBackendGenerationTask({
+    kind: 'video',
+    label: 'storyboard-video',
+    submit: {
+      url: endpoint,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-        console.error('[StoryboardService] Video API error:', response.status, errorText);
-      const error = new Error(errorText.trim() || `HTTP ${response.status}`) as Error & { status?: number };
-      error.status = response.status;
-      throw error;
-    }
-
-    return response.json();
+    },
+    poll: {
+      url: buildEndpoint(actualBaseUrl, 'tasks/{taskId}'),
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Cache-Control': 'no-cache',
+      },
+      intervalMs: 2000,
+    },
+    parse: defaultGenerationParse('video'),
+    result: { mediaKind: 'video' },
   }, {
-    maxRetries: 3,
-      baseDelay: 5000,
-    retryOn429: true,
+    intervalMs: 2000,
+    onProgress,
   });
 
-  console.log('[StoryboardService] Video API response:', data);
-
-  // Parse response
-  let taskId: string | undefined;
-  const dataField = data.data;
-  if (Array.isArray(dataField) && dataField.length > 0) {
-    taskId = dataField[0].task_id?.toString() || dataField[0].id?.toString();
-  } else if (dataField && typeof dataField === 'object') {
-    taskId = dataField.task_id?.toString() || dataField.id?.toString();
-  } else {
-    taskId = data.task_id?.toString() || data.id?.toString();
-  }
-
-  if (!taskId) {
-    throw new Error('API returned empty task ID');
-  }
-
+  const videoUrl = getBackendTaskResultUrl(task);
+  if (!videoUrl) throw new Error('后端故事板视频任务完成但没有视频 URL');
   return {
-    taskId,
-    estimatedTime: data.estimated_time || 120,
+    videoUrl,
+    estimatedTime: 0,
   };
-}
-
-/**
- * Poll video task status until completion
- * Uses the same unified /v1/tasks/ endpoint
- */
-async function pollVideoTaskCompletion(
-  taskId: string,
-  apiKey: string,
-  baseUrl: string,
-  onProgress?: (progress: number) => void
-): Promise<string> {
-  // Use the unified polling function with video type and dynamic baseUrl
-  return pollTaskCompletion(taskId, apiKey, baseUrl, onProgress, 'video');
 }
 
 /**
@@ -691,12 +511,10 @@ export async function generateSceneVideos(
           characterReferenceImages,
           model,
           resolvedBaseUrl,
-          config.videoResolution
+          config.videoResolution,
+          (progress) => onSceneProgress?.(scene.id, progress)
         );
 
-        onSceneProgress?.(scene.id, 30);
-
-        // If video URL is returned directly (unlikely for video)
         if (result.videoUrl) {
           results.set(scene.id, result.videoUrl);
           onSceneProgress?.(scene.id, 100);
@@ -704,23 +522,7 @@ export async function generateSceneVideos(
           continue;
         }
 
-        // Poll for completion
-        if (result.taskId) {
-          const videoUrl = await pollVideoTaskCompletion(
-            result.taskId,
-            apiKey,
-            resolvedBaseUrl, // 浣跨敤涓庢彁浜や换鍔＄浉鍚岀殑 baseUrl
-            (progress) => {
-              onSceneProgress?.(scene.id, 30 + Math.floor(progress * 0.7));
-            }
-          );
-
-          results.set(scene.id, videoUrl);
-          onSceneProgress?.(scene.id, 100);
-          onSceneComplete?.(scene.id, videoUrl);
-        } else {
-          throw new Error('Invalid API response: no taskId or videoUrl');
-        }
+        throw new Error('后端故事板视频任务完成但没有视频 URL');
       } else {
         throw new Error(`Video generation not yet supported for provider: ${provider}`);
       }
