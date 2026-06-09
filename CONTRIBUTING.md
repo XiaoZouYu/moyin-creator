@@ -28,14 +28,12 @@ npm run dev
 
 ```
 santi-creator/
-├── electron/          # Electron 主进程 + Preload
 ├── src/
 │   ├── components/    # React UI 组件
 │   ├── stores/        # Zustand 状态管理
 │   ├── lib/           # 工具库和业务逻辑
 │   ├── packages/      # 内部包 (@opencut/ai-core)
 │   └── types/         # TypeScript 类型定义
-├── build/             # 构建资源 (图标等)
 └── scripts/           # 工具脚本
 ```
 
@@ -45,8 +43,8 @@ santi-creator/
 # 编译项目
 npm run build
 
-# 仅编译（不打包安装程序）
-npx electron-vite build
+# 本地预览构建结果
+npm run preview
 ```
 
 ## 贡献流程

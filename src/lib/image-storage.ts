@@ -3,13 +3,13 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 /**
  * Image Storage Utility
- * Handles saving and loading images via Electron IPC
+ * Handles saving and loading media through the active Web platform adapter.
  */
 
 import { getUserScopedMediaCategory } from './user-session';
 import { corsFetch } from './cors-fetch';
 
-// Type declarations for the imageStorage API exposed by preload
+// Type declarations for the imageStorage API installed by web-platform.ts.
 declare global {
   interface Window {
     imageStorage?: {
@@ -25,7 +25,7 @@ declare global {
 export type ImageCategory = 'characters' | 'scenes' | 'shots' | 'wardrobe' | 'videos' | 'audios' | 'styles' | 'props';
 
 /**
- * Check if running in Electron environment
+ * Legacy name kept for existing stores; true when a platform media adapter exists.
  */
 export const isElectron = (): boolean => {
   return typeof window !== 'undefined' && !!window.imageStorage;
@@ -36,16 +36,16 @@ export const isElectron = (): boolean => {
  * @param url - The URL of the image to save
  * @param category - Category folder (characters, scenes, shots, wardrobe)
  * @param filename - Optional filename hint
- * @returns Local path (local-image://...) or original URL if not in Electron
+ * @returns Persisted media URL or original URL if platform storage is unavailable
  */
 export async function saveImageToLocal(
   url: string, 
   category: ImageCategory, 
   filename: string = 'image.png'
 ): Promise<string> {
-  // If not in Electron, return original URL
+  // If platform storage is unavailable, return original URL.
   if (!isElectron()) {
-    console.warn('Not running in Electron, image will not be saved locally');
+    console.warn('Platform image storage is unavailable; image will not be persisted');
     return url;
   }
 
@@ -66,8 +66,8 @@ export async function saveImageToLocal(
 }
 
 /**
- * Resolve a local-image:// path to an actual file:// URL
- * Falls back to the original path if not a local-image path or not in Electron
+ * Resolve a local-image:// path to a displayable URL.
+ * Falls back to the original path if platform storage is unavailable.
  */
 export async function resolveImagePath(path: string): Promise<string> {
   // If not a local-image path, return as-is
@@ -75,9 +75,9 @@ export async function resolveImagePath(path: string): Promise<string> {
     return path;
   }
 
-  // If not in Electron, can't resolve local paths
+  // If platform storage is unavailable, can't resolve local paths.
   if (!isElectron()) {
-    console.warn('Not running in Electron, cannot resolve local image path');
+    console.warn('Platform image storage is unavailable; cannot resolve local image path');
     return path;
   }
 
@@ -121,8 +121,8 @@ export async function readImageAsBase64(imagePath: string): Promise<string | nul
     return imagePath;
   }
 
-  // In Electron, let the main process read both local and remote image bytes.
-  // This avoids renderer CORS failures and preserves binary data over IPC.
+  // Let the platform adapter read both local and remote image bytes.
+  // This avoids browser CORS failures and preserves binary data across adapters.
   if (isElectron()) {
     try {
       const result = await window.imageStorage!.readAsBase64(imagePath);
@@ -159,14 +159,13 @@ export async function readImageAsBase64(imagePath: string): Promise<string | nul
     }
   }
 
-  // For local images, use Electron IPC
-  console.warn('Not running in Electron, cannot read local image');
+  console.warn('Platform image storage is unavailable; cannot read local image');
   return null;
 }
 
 /**
  * Get the absolute file path for a local-image:// URL
- * Useful for local video generation tools like FFmpeg
+ * Useful for local media tools when a platform adapter can expose paths.
  */
 export async function getAbsoluteImagePath(localPath: string): Promise<string | null> {
   if (!localPath.startsWith('local-image://')) {
@@ -175,7 +174,7 @@ export async function getAbsoluteImagePath(localPath: string): Promise<string | 
   }
 
   if (!isElectron()) {
-    console.warn('Not running in Electron, cannot get absolute path');
+    console.warn('Platform image storage is unavailable; cannot get absolute path');
     return null;
   }
 
@@ -191,13 +190,13 @@ export async function getAbsoluteImagePath(localPath: string): Promise<string | 
  * Save a video from URL to local storage
  * @param url - The URL of the video to save
  * @param filename - Optional filename hint
- * @returns Local path (local-image://videos/...) or original URL if not in Electron
+ * @returns Persisted media URL or original URL if platform storage is unavailable
  */
 export async function saveVideoToLocal(
   url: string, 
   filename: string = 'video.mp4'
 ): Promise<string> {
-  // If not in Electron or already local, return as-is
+  // If platform storage is unavailable or URL is already local/data, return as-is.
   if (!isElectron() || url.startsWith('local-image://') || url.startsWith('data:')) {
     return url;
   }

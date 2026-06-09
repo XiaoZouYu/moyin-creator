@@ -10,9 +10,8 @@
  * - `local-image://...` → resolved through the platform image storage bridge
  * - `null/undefined/''` → null
  *
- * Note: `local-image://` is registered as a privileged Electron protocol
- * (bypassCSP, secure) with a handler in main process, so it can be used
- * directly in <img src> without converting to file:// URLs.
+ * The Web platform adapter resolves `local-image://` values to displayable
+ * object URLs or cloud media URLs before rendering.
  */
 
 import { useEffect, useState } from 'react';

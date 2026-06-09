@@ -3,7 +3,7 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 /**
  * Image Persist Utility
- * Saves scene images to Electron local storage or OSS-backed HTTP URLs on Web.
+ * Saves scene images through the platform media adapter or OSS-backed HTTP URLs on Web.
  * Eliminates base64 data from Zustand state persistence.
  */
 
@@ -12,7 +12,7 @@ import { uploadToImageHost, isImageHostConfigured } from '@/lib/image-host';
 import { getUserScopedMediaCategory } from '@/lib/user-session';
 
 export interface PersistResult {
-  /** local-image:// in Electron, OSS HTTP URL in Web */
+  /** Persisted local-image:// or OSS HTTP URL */
   localPath: string;
   /** HTTP URL for API reuse */
   httpUrl: string | null;
@@ -53,7 +53,7 @@ async function saveImageForPersistence(
  * Input can be:
  * - base64 data URI (data:image/...)
  * - HTTP URL (will be downloaded and re-hosted on Web)
- * - local-image:// (already persisted in Electron; re-hosted on Web)
+ * - local-image:// (already persisted by a platform adapter; re-hosted on Web)
  *
  * @param imageData - The image data (base64 / URL / local-image://)
  * @param sceneId - Scene index for filename generation
@@ -68,7 +68,7 @@ export async function persistSceneImage(
 ): Promise<PersistResult> {
   const strictCloudMedia = isWebBrowserRuntime();
 
-  // Already persisted locally in Electron — skip saving.
+  // Already persisted by a native/platform adapter.
   if (!strictCloudMedia && imageData.startsWith('local-image://')) {
     return { localPath: imageData, httpUrl: null };
   }
@@ -81,14 +81,14 @@ export async function persistSceneImage(
   const timestamp = Date.now();
   const filename = `scene_${sceneId}_${frameType}_${timestamp}.png`;
 
-  // In Web this uploads to OSS and returns its HTTP URL. In Electron this returns local-image://.
+  // In Web this uploads to OSS and returns its HTTP URL.
   const localPath = await saveImageForPersistence(imageData, category, filename);
 
   if (strictCloudMedia) {
     return { localPath, httpUrl: localPath };
   }
 
-  // Optionally upload to image host for desktop/local images.
+  // Optionally upload local images to an image host for API reuse.
   let httpUrl: string | null = null;
   if (isImageHostConfigured()) {
     try {

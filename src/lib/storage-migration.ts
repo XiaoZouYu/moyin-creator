@@ -21,7 +21,7 @@ const MIGRATION_FLAG_KEY = '_p/_migrated';
  * before stores rehydrate from the new per-project paths.
  */
 export async function migrateToProjectStorage(): Promise<void> {
-  // Only run in Electron
+  // Only run when the platform file storage adapter is available.
   if (!window.fileStorage) return;
 
   // Check migration flag

@@ -5,7 +5,7 @@
  * Storyboard Generation Service
  * 
  * Handles the generation of storyboard contact sheet images using AI image APIs.
- * For Electron desktop app: directly calls external APIs (OpenAI 兼容中转)
+ * Uses the shared CORS-safe request path for external AI APIs.
  */
 
 import { buildStoryboardPrompt, getDefaultNegativePrompt, type StoryboardPromptConfig, type CharacterInfo } from './prompt-builder';
@@ -613,7 +613,7 @@ async function pollVideoTaskCompletion(
 
 /**
  * Generate videos for split scenes
- * Directly calls external APIs for Electron desktop app
+ * Uses the shared CORS-safe request path for external AI APIs.
  */
 export async function generateSceneVideos(
   scenes: Array<{

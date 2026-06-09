@@ -18,6 +18,7 @@ import type {
 import type { AIScreenplay, AIScene, GenerationConfig, AICharacter, CharacterBibleLike } from '@opencut/ai-core';
 import { PromptCompiler } from '@opencut/ai-core/services/prompt-compiler';
 import { TaskPoller } from '@opencut/ai-core/api/task-poller';
+import { corsFetch } from '@/lib/cors-fetch';
 import { mediaUrlToBlob } from '@/lib/media-source';
 
 const WORKER_VERSION = '0.3.1';
@@ -188,7 +189,7 @@ async function handleGenerateScreenplay(command: GenerateScreenplayCommand): Pro
     
     // Call the backend API with correct schema
     // Note: Pass raw prompt, API route will compile it with sceneCount
-    const response = await fetch(buildApiUrl('/api/ai/screenplay'), {
+    const response = await corsFetch(buildApiUrl('/api/ai/screenplay'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -248,7 +249,7 @@ async function generateImage(
   }
   
   // Submit image generation task
-  const submitResponse = await fetch(buildApiUrl('/api/ai/image'), {
+  const submitResponse = await corsFetch(buildApiUrl('/api/ai/image'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -304,7 +305,7 @@ async function generateVideo(
   }
   
   // Submit video generation task
-  const submitResponse = await fetch(buildApiUrl('/api/ai/video'), {
+  const submitResponse = await corsFetch(buildApiUrl('/api/ai/video'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -358,7 +359,7 @@ async function pollTaskCompletion(
     }
     
     // API Key 通过 Header 传递，避免明文出现在 URL 中（安全风险：URL 会被日志/历史记录）
-    const statusResponse = await fetch(
+    const statusResponse = await corsFetch(
       buildApiUrl(`/api/ai/task/${taskId}?provider=${provider}&type=${type}`),
       {
         headers: {

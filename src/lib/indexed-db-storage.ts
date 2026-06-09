@@ -3,8 +3,7 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 /**
  * File Storage Adapter for Zustand
- * Uses Electron's file system for unlimited storage
- * Falls back to localStorage in browser
+ * Uses the active Web file storage adapter and falls back to localStorage.
  */
 
 import type { StateStorage } from 'zustand/middleware';
@@ -14,7 +13,7 @@ import {
   userScopedLocalStorage,
 } from './user-session';
 
-// Type declarations for the fileStorage API exposed by preload
+// Type declarations for the fileStorage API installed by web-platform.ts.
 declare global {
   interface Window {
     fileStorage?: {
@@ -29,7 +28,7 @@ declare global {
   }
 }
 
-const isElectron = (): boolean => {
+const hasPlatformFileStorage = (): boolean => {
   return typeof window !== 'undefined' && !!window.fileStorage;
 };
 
@@ -67,8 +66,8 @@ const hasRichData = (jsonStr: string | null): boolean => {
 export const fileStorage: StateStorage = {
   getItem: async (name: string): Promise<string | null> => {
     const scopedName = getUserScopedStorageKey(name);
-    console.log(`[Storage] getItem: ${name}, scoped: ${scopedName}, isElectron: ${isElectron()}`);
-    if (isElectron()) {
+    console.log(`[Storage] getItem: ${name}, scoped: ${scopedName}, platformFileStorage: ${hasPlatformFileStorage()}`);
+    if (hasPlatformFileStorage()) {
       try {
         // Get data from all sources
         const fileData = await window.fileStorage!.getItem(scopedName);
@@ -92,7 +91,7 @@ export const fileStorage: StateStorage = {
         // Priority: localStorage > IndexedDB > file (for migration)
         // If localStorage or IndexedDB has richer data, migrate it
         if (localHasData && !fileHasData) {
-          console.log(`[Storage] Migrating ${name} from localStorage to file storage (richer data)...`);
+          console.log(`[Storage] Migrating ${name} from localStorage to platform file storage (richer data)...`);
           await window.fileStorage!.setItem(scopedName, localData!);
           userScopedLocalStorage.removeItem(name);
           console.log(`[Storage] Migration complete for ${name}`);
@@ -100,7 +99,7 @@ export const fileStorage: StateStorage = {
         }
         
         if (idbHasData && !fileHasData && !localHasData) {
-          console.log(`[Storage] Migrating ${name} from IndexedDB to file storage (richer data)...`);
+          console.log(`[Storage] Migrating ${name} from IndexedDB to platform file storage (richer data)...`);
           await window.fileStorage!.setItem(scopedName, idbData!);
           await removeFromIndexedDB(scopedName);
           console.log(`[Storage] Migration complete for ${name}`);
@@ -126,14 +125,14 @@ export const fileStorage: StateStorage = {
         console.error('File storage getItem error:', error);
       }
     }
-    // Fallback to localStorage (browser mode)
+    // Fallback to localStorage.
     return userScopedLocalStorage.getItem(name);
   },
 
   setItem: async (name: string, value: string): Promise<void> => {
     const scopedName = getUserScopedStorageKey(name);
-    console.log(`[Storage] setItem: ${name}, scoped: ${scopedName}, size: ${value.length} chars, isElectron: ${isElectron()}`);
-    if (isElectron()) {
+    console.log(`[Storage] setItem: ${name}, scoped: ${scopedName}, size: ${value.length} chars, platformFileStorage: ${hasPlatformFileStorage()}`);
+    if (hasPlatformFileStorage()) {
       try {
         const result = await window.fileStorage!.setItem(scopedName, value);
         console.log(`[Storage] File save result for ${name}:`, result);
@@ -152,7 +151,7 @@ export const fileStorage: StateStorage = {
 
   removeItem: async (name: string): Promise<void> => {
     const scopedName = getUserScopedStorageKey(name);
-    if (isElectron()) {
+    if (hasPlatformFileStorage()) {
       try {
         await window.fileStorage!.removeItem(scopedName);
         return;
@@ -166,7 +165,7 @@ export const fileStorage: StateStorage = {
 
 export async function fileStorageExists(name: string): Promise<boolean> {
   const scopedName = getUserScopedStorageKey(name);
-  if (isElectron() && window.fileStorage?.exists) {
+  if (hasPlatformFileStorage() && window.fileStorage?.exists) {
     return window.fileStorage.exists(scopedName);
   }
   return userScopedLocalStorage.getItem(name) !== null;
@@ -174,7 +173,7 @@ export async function fileStorageExists(name: string): Promise<boolean> {
 
 export async function fileStorageListKeys(prefix: string): Promise<string[]> {
   const scopedPrefix = getUserScopedStorageKey(prefix).replace(/\/+$/g, '');
-  if (isElectron() && window.fileStorage?.listKeys) {
+  if (hasPlatformFileStorage() && window.fileStorage?.listKeys) {
     const keys = await window.fileStorage.listKeys(scopedPrefix);
     return keys.map(stripCurrentUserStoragePrefix);
   }
@@ -187,7 +186,7 @@ export async function fileStorageListKeys(prefix: string): Promise<string[]> {
 
 export async function fileStorageListDirs(prefix: string): Promise<string[]> {
   const scopedPrefix = getUserScopedStorageKey(prefix).replace(/\/+$/g, '');
-  if (isElectron() && window.fileStorage?.listDirs) {
+  if (hasPlatformFileStorage() && window.fileStorage?.listDirs) {
     return window.fileStorage.listDirs(scopedPrefix);
   }
 
@@ -203,7 +202,7 @@ export async function fileStorageListDirs(prefix: string): Promise<string[]> {
 
 export async function fileStorageRemoveDir(prefix: string): Promise<boolean> {
   const scopedPrefix = getUserScopedStorageKey(prefix).replace(/\/+$/g, '');
-  if (isElectron() && window.fileStorage?.removeDir) {
+  if (hasPlatformFileStorage() && window.fileStorage?.removeDir) {
     return window.fileStorage.removeDir(scopedPrefix);
   }
 

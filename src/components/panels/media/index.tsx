@@ -320,10 +320,9 @@ export function MediaView() {
       return;
     }
     try {
-      // For local protocol URLs, use Electron's save dialog
+      // For local protocol URLs, use the platform download bridge when available.
       if (item.url.startsWith('local-image://') || item.url.startsWith('local-video://')) {
         if (typeof window !== 'undefined' && (window as any).electronAPI?.saveFileDialog) {
-          // Use Electron's save dialog
           const result = await (window as any).electronAPI.saveFileDialog({
             localPath: item.url,
             defaultPath: item.name,

@@ -23,12 +23,11 @@ type MediaRecord = {
 let dbPromise: Promise<IDBDatabase> | null = null
 let localMediaElementsPatched = false
 
-function isElectronRuntime() {
+function hasNativeDesktopBridge() {
   return !!(
     typeof window !== 'undefined' &&
     (
       window.ipcRenderer ||
-      window.electronAPI ||
       navigator.userAgent.includes('Electron')
     )
   )
@@ -204,6 +203,32 @@ function buildProxyUrl(targetUrl: string): string {
   return `/__api_proxy?url=${encodeURIComponent(targetUrl)}`
 }
 
+function summarizeFetchTarget(targetUrl: string): string {
+  try {
+    const url = new URL(targetUrl)
+    return `${url.origin}${url.pathname}`
+  } catch {
+    return targetUrl.slice(0, 120)
+  }
+}
+
+function getRequestMethod(init?: RequestInit): string {
+  return (init?.method || 'GET').toUpperCase()
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+    || error instanceof Error && error.name === 'AbortError'
+}
+
+function getFriendlyFetchFailure(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error)
+  if (/^failed to fetch$/i.test(detail) || /^load failed$/i.test(detail) || /networkerror/i.test(detail)) {
+    return '浏览器网络层无法连通目标地址，常见原因是代理服务不可用、目标服务不可达、CORS/预检失败或浏览器拦截。'
+  }
+  return detail || '未知网络错误'
+}
+
 function headersToRecord(headers?: HeadersInit): Record<string, string> {
   const record: Record<string, string> = {}
   new Headers(headers).forEach((value, key) => {
@@ -264,7 +289,12 @@ function removeContentType(headers: Record<string, string>): Record<string, stri
 
 async function webFetch(targetUrl: string, init?: RequestInit): Promise<Response> {
   if (!shouldProxyUrl(targetUrl)) {
-    return fetch(targetUrl, init)
+    try {
+      return await fetch(targetUrl, init)
+    } catch (error) {
+      if (isAbortError(error)) throw error
+      throw new Error(`网络请求失败：${getRequestMethod(init)} ${summarizeFetchTarget(targetUrl)}。${getFriendlyFetchFailure(error)}`)
+    }
   }
 
   let originalHeaders = headersToRecord(init?.headers)
@@ -288,12 +318,14 @@ async function webFetch(targetUrl: string, init?: RequestInit): Promise<Response
       body: proxyBody,
     })
   } catch (error) {
+    if (isAbortError(error)) throw error
     const configuredProxy = import.meta.env.VITE_WEB_API_PROXY_URL
-    const detail = error instanceof Error ? error.message : String(error)
+    const target = `${getRequestMethod(init)} ${summarizeFetchTarget(targetUrl)}`
+    const reason = getFriendlyFetchFailure(error)
     throw new Error(
       configuredProxy
-        ? `Web API proxy request failed: ${detail}. Check VITE_WEB_API_PROXY_URL CORS/OPTIONS configuration.`
-        : `Web API proxy /__api_proxy request failed: ${detail}. Run the production web server or configure VITE_WEB_API_PROXY_URL.`,
+        ? `跨域代理请求失败：${target}。代理 ${summarizeFetchTarget(proxyUrl)} 不可用或未正确允许 CORS/OPTIONS。${reason}`
+        : `跨域代理 /__api_proxy 请求失败：${target}。请确认正式环境使用 scripts/web-server.mjs/Docker 服务，或配置 VITE_WEB_API_PROXY_URL。${reason}`,
     )
   }
 
@@ -848,7 +880,7 @@ function installImageStorage() {
   } as Window['imageStorage']
 }
 
-function installElectronApi() {
+function installApiBridge() {
   if (window.electronAPI) return
 
   window.electronAPI = {
@@ -876,11 +908,11 @@ function installStorageManager() {
       cachePath: 'Browser HTTP cache',
     }),
     selectDirectory: async () => null,
-    validateDataDir: async () => ({ valid: false, error: 'Directory selection is only available in desktop mode.' }),
-    moveData: async () => ({ success: false, error: 'Changing the storage directory is only available in desktop mode.' }),
-    linkData: async () => ({ success: false, error: 'Linking an external data directory is only available in desktop mode.' }),
-    exportData: async () => ({ success: false, error: 'Directory export is only available in desktop mode.' }),
-    importData: async () => ({ success: false, error: 'Directory import is only available in desktop mode.' }),
+    validateDataDir: async () => ({ valid: false, error: 'Web 版本不支持选择本地数据目录。' }),
+    moveData: async () => ({ success: false, error: 'Web 版本不支持迁移本地数据目录。' }),
+    linkData: async () => ({ success: false, error: 'Web 版本不支持链接本地数据目录。' }),
+    exportData: async () => ({ success: false, error: 'Web 版本不支持目录级导出。' }),
+    importData: async () => ({ success: false, error: 'Web 版本不支持目录级导入。' }),
     getCacheSize: async () => ({
       total: (await getAllMedia()).reduce((sum, item) => sum + (item.size || 0), 0),
       details: [{ path: 'Browser media store', size: (await getAllMedia()).reduce((sum, item) => sum + (item.size || 0), 0) }],
@@ -1059,11 +1091,11 @@ function patchLocalMediaElements() {
 }
 
 export function installWebPlatformAdapters() {
-  if (typeof window === 'undefined' || isElectronRuntime() || !('indexedDB' in window)) return
+  if (typeof window === 'undefined' || hasNativeDesktopBridge() || !('indexedDB' in window)) return
 
   installFileStorage()
   installImageStorage()
-  installElectronApi()
+  installApiBridge()
   installStorageManager()
   installAppUpdater()
   installImageHostUploader()

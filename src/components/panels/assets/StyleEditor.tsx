@@ -101,7 +101,7 @@ export function StyleEditor({ styleId, onClose }: StyleEditorProps) {
     try {
       const newImages: string[] = [];
       for (const file of Array.from(files)) {
-        // 转为 data URL 再保存（避免 blob: 协议不被 Electron 支持）
+        // 转为 data URL 再保存，避免持久化会话级 blob: URL。
         const dataUrl = await fileToDataUrl(file);
         const filename = `style_ref_${Date.now()}_${file.name}`;
         const localPath = await saveImageToLocal(dataUrl, "styles", filename);

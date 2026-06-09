@@ -4,21 +4,19 @@
 /**
  * CORS-safe fetch wrapper
  *
- * 自动检测运行环境：
- * - Electron 桌面模式 → 直接使用原生 fetch()（无 CORS 限制）
- * - 浏览器模式       → 对跨域 URL 通过 /__api_proxy 或 VITE_WEB_API_PROXY_URL 代理转发
+ * Web 运行时：
+ * - 同源/非 HTTP 请求 → 直接使用 fetch()
+ * - 跨域 HTTP(S) 请求 → 通过 /__api_proxy 或 VITE_WEB_API_PROXY_URL 代理转发
  */
 
-/** 检测是否在原生 Electron 环境中运行；Web 兼容层注入的 electronAPI 不算。 */
-function isNativeElectron(): boolean {
-  return !!(
-    typeof window !== 'undefined' &&
-    (
-      (window as any).electron ||
-      (window as any).ipcRenderer ||
-      navigator.userAgent.includes('Electron')
-    )
-  );
+const nativeFetch = globalThis.fetch?.bind(globalThis);
+const GUARDED_FETCH_MARKER = '__moyinCreatorGuardedFetch';
+
+function getNativeFetch(): typeof fetch {
+  if (!nativeFetch) {
+    throw new Error('当前运行环境不支持 fetch');
+  }
+  return nativeFetch;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -32,15 +30,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
 function summarizeFetchTarget(targetUrl: string): string {
   try {
     const url = new URL(targetUrl);
@@ -50,9 +39,43 @@ function summarizeFetchTarget(targetUrl: string): string {
   }
 }
 
-function normalizeFetchFailure(error?: string): string {
-  if (!error) return '未知网络错误';
-  return error;
+function getRequestMethod(init?: RequestInit): string {
+  return (init?.method || 'GET').toUpperCase();
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+    || error instanceof Error && error.name === 'AbortError';
+}
+
+function getFriendlyFetchFailure(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (/^failed to fetch$/i.test(detail) || /^load failed$/i.test(detail) || /networkerror/i.test(detail)) {
+    return '浏览器网络层无法连通目标地址，常见原因是代理服务不可用、目标服务不可达、CORS/预检失败或浏览器拦截。';
+  }
+  return detail || '未知网络错误';
+}
+
+function createDirectFetchError(targetUrl: string, init: RequestInit | undefined, error: unknown): Error {
+  return new Error(
+    `网络请求失败：${getRequestMethod(init)} ${summarizeFetchTarget(targetUrl)}。${getFriendlyFetchFailure(error)}`,
+  );
+}
+
+function createProxyFetchError(
+  targetUrl: string,
+  proxyUrl: string,
+  init: RequestInit | undefined,
+  error: unknown,
+): Error {
+  const configuredProxy = import.meta.env?.VITE_WEB_API_PROXY_URL;
+  const target = `${getRequestMethod(init)} ${summarizeFetchTarget(targetUrl)}`;
+  const reason = getFriendlyFetchFailure(error);
+  return new Error(
+    configuredProxy
+      ? `跨域代理请求失败：${target}。代理 ${summarizeFetchTarget(proxyUrl)} 不可用或未正确允许 CORS/OPTIONS。${reason}`
+      : `跨域代理 /__api_proxy 请求失败：${target}。请确认正式环境使用 scripts/web-server.mjs/Docker 服务，或配置 VITE_WEB_API_PROXY_URL。${reason}`,
+  );
 }
 
 async function serializeFormData(formData: FormData): Promise<Array<{
@@ -85,32 +108,6 @@ async function serializeFormData(formData: FormData): Promise<Array<{
   }
 
   return fields;
-}
-
-async function serializeElectronBody(body: BodyInit | null | undefined): Promise<{
-  body?: string;
-  bodyBase64?: string;
-  formData?: Array<{
-    name: string;
-    value?: string;
-    fileName?: string;
-    mimeType?: string;
-    dataBase64?: string;
-  }>;
-}> {
-  if (body === undefined || body === null) return {};
-  if (typeof body === 'string') return { body };
-  if (body instanceof URLSearchParams) return { body: body.toString() };
-  if (body instanceof FormData) return { formData: await serializeFormData(body) };
-  if (body instanceof Blob) return { bodyBase64: arrayBufferToBase64(await body.arrayBuffer()) };
-  if (body instanceof ArrayBuffer) return { bodyBase64: arrayBufferToBase64(body) };
-  if (ArrayBuffer.isView(body)) {
-    const view = body as ArrayBufferView;
-    const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-    const copy = new Uint8Array(bytes);
-    return { bodyBase64: arrayBufferToBase64(copy.buffer) };
-  }
-  return {};
 }
 
 function removeContentType(headers: Record<string, string>): Record<string, string> {
@@ -149,9 +146,9 @@ function buildProxyUrl(targetUrl: string): string {
 }
 
 /**
- * CORS 安全的 fetch 封装
+ * Web CORS 安全 fetch 封装
  *
- * 在浏览器模式下，自动将跨域 HTTP(S) 请求代理到 `/__api_proxy`
+ * 自动将跨域 HTTP(S) 请求代理到 `/__api_proxy`
  * 或 VITE_WEB_API_PROXY_URL，由服务端转发请求以绕过 CORS 限制。
  *
  * @param url    目标 URL（与原生 fetch 参数相同）
@@ -164,38 +161,14 @@ export async function corsFetch(
 ): Promise<Response> {
   const targetUrl = url.toString();
 
-  if (typeof window !== 'undefined' && isNativeElectron() && window.electronAPI?.apiFetch) {
-    const requestHeaders = new Headers(init?.headers);
-    const headers: Record<string, string> = {};
-    requestHeaders.forEach((value, key) => {
-      headers[key] = value;
-    });
-
-    const serializedBody = await serializeElectronBody(init?.body);
-    const result = await window.electronAPI.apiFetch({
-      url: targetUrl,
-      method: init?.method,
-      headers,
-      responseType: 'base64',
-      ...serializedBody,
-    });
-
-    if (result.status === 0) {
-      throw new TypeError(
-        `Electron 主进程请求失败：${init?.method || 'GET'} ${summarizeFetchTarget(targetUrl)}：${normalizeFetchFailure(result.error)}`,
-      );
+  // 同源/非 HTTP 请求：直连
+  if (!shouldProxyUrl(targetUrl)) {
+    try {
+      return await getNativeFetch()(targetUrl, init);
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw createDirectFetchError(targetUrl, init, error);
     }
-
-    return new Response(result.bodyBase64 ? base64ToArrayBuffer(result.bodyBase64) : result.body, {
-      status: result.status,
-      statusText: result.statusText,
-      headers: result.headers,
-    });
-  }
-
-  // Electron 或同源/非 HTTP 请求：直连
-  if (isNativeElectron() || !shouldProxyUrl(targetUrl)) {
-    return fetch(targetUrl, init);
   }
 
   // 浏览器模式：跨域请求统一走代理，避免外部图片/图床/API CORS 失败
@@ -229,15 +202,10 @@ export async function corsFetch(
 
   let response: Response;
   try {
-    response = await fetch(proxyUrl, proxyInit);
+    response = await getNativeFetch()(proxyUrl, proxyInit);
   } catch (error) {
-    const configuredProxy = import.meta.env?.VITE_WEB_API_PROXY_URL;
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      configuredProxy
-        ? `跨域代理请求失败：${detail}。请确认 VITE_WEB_API_PROXY_URL 指向的代理可访问并允许 CORS/OPTIONS。`
-        : `跨域代理 /__api_proxy 请求失败：${detail}。请确认正式环境使用 scripts/web-server.mjs/Docker 服务，或配置 VITE_WEB_API_PROXY_URL。`,
-    );
+    if (isAbortError(error)) throw error;
+    throw createProxyFetchError(targetUrl, proxyUrl, init, error);
   }
   const configuredProxy = import.meta.env?.VITE_WEB_API_PROXY_URL;
   const contentType = response.headers.get('content-type') || '';
@@ -248,4 +216,35 @@ export async function corsFetch(
     throw new Error('跨域代理 /__api_proxy 返回 HTML，请检查线上反向代理配置');
   }
   return response;
+}
+
+async function requestToCorsFetch(input: Request, init?: RequestInit): Promise<Response> {
+  const method = init?.method || input.method;
+  const headers = init?.headers || input.headers;
+  const shouldReadBody = method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD';
+  const body = init?.body ?? (shouldReadBody ? await input.clone().blob() : undefined);
+
+  return corsFetch(input.url, {
+    ...init,
+    method,
+    headers,
+    body,
+    signal: init?.signal || input.signal,
+  });
+}
+
+export function installGlobalFetchGuard(): void {
+  if (typeof window === 'undefined') return;
+  const currentFetch = window.fetch as typeof fetch & { [GUARDED_FETCH_MARKER]?: true };
+  if (currentFetch?.[GUARDED_FETCH_MARKER]) return;
+
+  const guardedFetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if (input instanceof Request) {
+      return requestToCorsFetch(input, init);
+    }
+    return corsFetch(input instanceof URL ? input : String(input), init);
+  }) as typeof fetch & { [GUARDED_FETCH_MARKER]?: true };
+
+  guardedFetch[GUARDED_FETCH_MARKER] = true;
+  window.fetch = guardedFetch;
 }

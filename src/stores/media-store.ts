@@ -258,12 +258,12 @@ export const useMediaStore = create<MediaStore>()(
       console.error("Failed to save media item to OPFS:", error);
     }
 
-    // Also save to Electron local storage for persistent URL
-    // blob: URLs can't be passed to IPC, so we convert File → data: URL → local file
+    // Also save through the platform media adapter for a persistent URL.
+    // blob: URLs are session-scoped, so convert File → data: URL first.
     if (isElectron() && newItem.file && (newItem.type === 'image' || newItem.type === 'video' || newItem.type === 'audio')) {
       (async () => {
         try {
-          // Convert File to data: URL (IPC handler supports data: but not blob:)
+          // Convert File to data: URL because blob: URLs are session-scoped.
           const dataUrl = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onloadend = () => resolve(reader.result as string);
@@ -514,7 +514,7 @@ export const useMediaStore = create<MediaStore>()(
       mediaFiles: [...state.mediaFiles, newItem],
     }));
     
-    // For images and videos, save to local file system in Electron
+    // For images and videos, persist through the platform media adapter.
     // Handles http, https, and data: URLs
     if ((type === 'image' || type === 'video') && url && (url.startsWith('http') || url.startsWith('data:'))) {
       (async () => {

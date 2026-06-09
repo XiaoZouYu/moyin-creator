@@ -1502,14 +1502,13 @@ export async function extractLastFrameFromVideo(
   videoUrl: string,
   seekOffset: number = 0.1
 ): Promise<string | null> {
-  // local-image:// 是 Electron 注册的自定义协议，可以直接使用
-  // 不需要转换为 file://
+  // local-image:// 由平台媒体适配器解析，不需要转换为 file://。
   const resolvedUrl = videoUrl;
   console.log('[VideoGen] Loading video for frame extraction:', resolvedUrl);
   
   return new Promise((resolve) => {
     const video = document.createElement('video');
-    // local-image:// 是受信任的协议，不需要 crossOrigin
+    // local-image:// 由同一平台适配器提供，不需要 crossOrigin。
     if (!resolvedUrl.startsWith('local-image://') && !resolvedUrl.startsWith('file://')) {
       video.crossOrigin = 'anonymous';
     }

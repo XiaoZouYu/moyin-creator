@@ -6,7 +6,7 @@
 /**
  * LocalImage Component
  * Handles displaying images that may be stored locally (local-image://) or remotely
- * The local-image:// protocol is handled by Electron's custom protocol handler
+ * The Web platform adapter resolves local-image:// values before rendering.
  */
 
 import { useEffect, useState } from "react";

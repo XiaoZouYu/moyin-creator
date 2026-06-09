@@ -1695,7 +1695,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         videoController.signal,
       );
 
-      // Save video to local file system (Electron) for persistence
+      // Persist video through the platform media adapter when available.
       let finalVideoUrl = videoUrl;
       try {
         const filename = `scene_${sceneId + 1}_${Date.now()}.mp4`;

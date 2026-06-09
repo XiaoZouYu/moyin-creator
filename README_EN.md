@@ -114,20 +114,19 @@ After launching, go to **Settings → API Configuration** and enter your AI prov
 ### Build
 
 ```bash
-# Compile + package Windows installer
+# Build Web static assets
 npm run build
 
-# Compile only (no packaging)
-npx electron-vite build
+# Preview the production build locally
+npm run preview
 ```
 
 ## Architecture
 
 | Layer | Technology |
 |-------|-----------|
-| Desktop Framework | Electron 30 |
 | Frontend | React 18 + TypeScript |
-| Build Tool | electron-vite (Vite 5) |
+| Build Tool | Vite 5 |
 | State Management | Zustand 5 |
 | UI Components | Radix UI + Tailwind CSS 4 |
 | AI Core | `@opencut/ai-core` (prompt compilation, character bible, task polling) |
@@ -136,9 +135,6 @@ npx electron-vite build
 
 ```
 santi-creator/
-├── electron/              # Electron main process + Preload
-│   ├── main.ts            # Main process (storage, file system, protocol handling)
-│   └── preload.ts         # Security bridge layer
 ├── src/
 │   ├── components/        # React UI components
 │   │   ├── panels/        # Main panels (Script, Character, Scene, Storyboard, Director)
@@ -148,7 +144,6 @@ santi-creator/
 │   ├── packages/          # Internal packages
 │   │   └── ai-core/       # AI core engine
 │   └── types/             # TypeScript type definitions
-├── build/                 # Build resources (icons)
 └── scripts/               # Utility scripts
 ```
 

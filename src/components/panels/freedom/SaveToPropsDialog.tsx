@@ -63,7 +63,7 @@ export function SaveToPropsDialog({
     const name = propName.trim() || `道具_${Date.now()}`;
     setSaving(true);
     try {
-      // 尝试持久化到本地存储（Electron），浏览器端回退为原始URL
+      // 尝试通过平台媒体适配器持久化，失败时回退为原始 URL。
       const localPath = await saveImageToLocal(
         imageUrl,
         'props',

@@ -1930,8 +1930,7 @@ async function submitViaKlingImages(
 
 /**
  * Convert image URL to persistent format
- * In Electron: saves to local file system and returns local-image:// path
- * In browser: converts to base64
+ * Uses the platform media adapter when available; otherwise converts to base64.
  */
 export async function imageUrlToBase64(url: string): Promise<string> {
   // If already a local or base64 path, return as-is
@@ -1939,7 +1938,7 @@ export async function imageUrlToBase64(url: string): Promise<string> {
     return url;
   }
   
-  // Try to use Electron local storage first
+  // Try to persist through the platform media adapter first.
   if (typeof window !== 'undefined' && window.imageStorage) {
     try {
       const filename = `image_${Date.now()}.png`;

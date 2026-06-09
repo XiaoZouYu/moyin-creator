@@ -126,20 +126,19 @@ npm run dev
 ### 构建
 
 ```bash
-# 编译 + 打包 Windows 安装程序
+# 构建 Web 静态资源
 npm run build
 
-# 仅编译（不打包）
-npx electron-vite build
+# 本地预览构建结果
+npm run preview
 ```
 
 ## 技术架构
 
 | 层级 | 技术 |
 |------|------|
-| 桌面框架 | Electron 30 |
 | 前端框架 | React 18 + TypeScript |
-| 构建工具 | electron-vite (Vite 5) |
+| 构建工具 | Vite 5 |
 | 状态管理 | Zustand 5 |
 | UI 组件 | Radix UI + Tailwind CSS 4 |
 | AI 核心 | `@opencut/ai-core`（提示词编译、角色圣经、任务轮询） |
@@ -148,9 +147,6 @@ npx electron-vite build
 
 ```
 santi-creator/
-├── electron/              # Electron 主进程 + Preload
-│   ├── main.ts            # 主进程（存储管理、文件系统、协议处理）
-│   └── preload.ts         # 安全桥接层
 ├── src/
 │   ├── components/        # React UI 组件
 │   │   ├── panels/        # 主面板（剧本、角色、场景、分镜、导演）
@@ -160,7 +156,6 @@ santi-creator/
 │   ├── packages/          # 内部包
 │   │   └── ai-core/       # AI 核心引擎
 │   └── types/             # TypeScript 类型定义
-├── build/                 # 构建资源（图标）
 └── scripts/               # 工具脚本
 ```
 

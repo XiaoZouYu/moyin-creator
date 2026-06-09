@@ -1281,7 +1281,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           });
           const videoDuration = Math.max(4, Math.min(12, scene.duration || 5));
           
-          const submitResponse = await fetch(`${baseUrl}/api/ai/video`, {
+          const submitResponse = await corsFetch(`${baseUrl}/api/ai/video`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1613,7 +1613,7 @@ export function SClassScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
         storyboardConfig.videoResolution as '480p' | '720p' | '1080p' | undefined,
       );
 
-      // Save video to local file system (Electron) for persistence
+      // Persist video through the platform media adapter when available.
       let finalVideoUrl = videoUrl;
       try {
         const filename = `scene_${sceneId + 1}_${Date.now()}.mp4`;

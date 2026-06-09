@@ -42,7 +42,7 @@ export function UpdateDialog({
 
   const handleOpenLink = async (url: string) => {
     if (!window.appUpdater) {
-      toast.error("请在桌面版中使用此功能");
+      toast.error("当前 Web 版本无法打开更新链接");
       return;
     }
     const result = await window.appUpdater.openExternalLink(url);

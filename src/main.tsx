@@ -5,8 +5,10 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import './lib/user-session'
 import './index.css'
+import { installGlobalFetchGuard } from './lib/cors-fetch'
 import { installWebPlatformAdapters } from './lib/web-platform'
 
+installGlobalFetchGuard()
 installWebPlatformAdapters()
 
 async function bootstrap() {
@@ -17,13 +19,6 @@ async function bootstrap() {
       <App />
     </React.StrictMode>,
   )
-
-  // Use contextBridge (only available in Electron)
-  if (window.ipcRenderer) {
-    window.ipcRenderer.on('main-process-message', (_event, message) => {
-      console.log(message)
-    })
-  }
 }
 
 void bootstrap()

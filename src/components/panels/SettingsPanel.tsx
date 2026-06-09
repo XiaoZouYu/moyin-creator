@@ -419,7 +419,7 @@ export function SettingsPanel() {
   // Unified storage handlers
   const handleSelectStoragePath = async () => {
     if (!window.storageManager) {
-      toast.error("请在桌面应用中使用此功能");
+      toast.error("Web 版本不支持选择本地数据目录");
       return;
     }
     const dir = await window.storageManager.selectDirectory();
@@ -498,7 +498,7 @@ export function SettingsPanel() {
 
   const handleLinkData = async () => {
     if (!window.storageManager) {
-      toast.error("请在桌面应用中使用此功能");
+      toast.error("Web 版本不支持链接本地数据目录");
       return;
     }
     const dir = await window.storageManager.selectDirectory();
@@ -561,7 +561,7 @@ export function SettingsPanel() {
 
   const handleCheckForUpdates = async () => {
     if (!window.appUpdater) {
-      toast.error("请在桌面应用中使用此功能");
+      toast.error("当前 Web 版本不提供内置更新检查");
       return;
     }
 
@@ -1247,7 +1247,7 @@ export function SettingsPanel() {
                   <Info className="h-5 w-5 text-muted-foreground mt-0.5 shrink-0" />
                   <div>
                     <p className="text-sm text-muted-foreground">
-                      存储设置仅在桌面版中可用。
+                      Web 版本不支持本地目录级存储设置。
                     </p>
                   </div>
                 </div>
@@ -1456,7 +1456,7 @@ export function SettingsPanel() {
                   <div>
                     <p className="text-sm font-medium">启动时自动检查更新</p>
                     <p className="text-xs text-muted-foreground">
-                      开启后，桌面版启动时会自动检查远程版本清单并提示新版本
+                      开启后，启动时会自动检查远程版本清单并提示新版本
                     </p>
                   </div>
                   <Switch
@@ -1482,7 +1482,7 @@ export function SettingsPanel() {
 
                 {!hasAppUpdater && (
                   <p className="text-xs text-muted-foreground">
-                    此功能仅在桌面打包版中可用。
+                    当前 Web 版本不提供内置更新安装。
                   </p>
                 )}
               </div>

@@ -15,24 +15,16 @@
   },
   "type": "module",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "npm run dev:web",
     "dev:web": "vite --config vite.web.config.ts --host 0.0.0.0",
     "dev:web:persistent": "npm run db:up && npm run dev:web",
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose stop postgres",
-    "build": "npm run build:desktop",
+    "build": "npm run build:web",
     "build:web": "vite build --config vite.web.config.ts",
-    "prebuild": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/prebuild-cleanup.ps1",
-    "build:desktop": "node ./scripts/build-desktop.mjs",
-    "build:win": "node ./scripts/build-desktop.mjs --win",
-    "build:mac": "node ./scripts/build-desktop.mjs --mac",
-    "build:mac:all": "node ./scripts/build-desktop.mjs --mac --arm64 --x64",
-    "build:mac:x64": "node ./scripts/build-desktop.mjs --mac --x64",
-    "build:mac:arm64": "node ./scripts/build-desktop.mjs --mac --arm64",
-    "build:mac:universal": "node ./scripts/build-desktop.mjs --mac --universal",
-    "build:linux": "node ./scripts/build-desktop.mjs --linux",
+    "check:network": "node ./scripts/check-network-fetch.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "preview": "electron-vite preview",
+    "preview": "npm run preview:web",
     "preview:web": "vite preview --config vite.web.config.ts --host 0.0.0.0"
   },
   "dependencies": {
@@ -82,20 +74,12 @@
     "@typescript-eslint/parser": "^7.1.1",
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.23",
-    "electron": "^30.0.1",
-    "electron-builder": "^24.13.3",
-    "electron-vite": "^5.0.0",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.5",
-    "png-to-ico": "^3.0.1",
     "postcss": "^8.5.6",
-    "sharp": "^0.34.5",
     "tailwindcss": "^4.1.18",
     "typescript": "^5.2.2",
-    "vite": "^5.1.6",
-    "vite-plugin-electron": "^0.29.0",
-    "vite-plugin-electron-renderer": "^0.14.6"
-  },
-  "main": "out/main/index.cjs"
+    "vite": "^5.1.6"
+  }
 }
