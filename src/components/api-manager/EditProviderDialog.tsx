@@ -20,11 +20,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
 import type { IProvider } from "@/lib/api-key-manager";
 import { getApiKeyCount } from "@/lib/api-key-manager";
 import { isAgnesProvider, isFixedBaseUrlProviderPlatform, normalizeBuiltInProvider } from "@/lib/ai/provider-platforms";
-import { VOLC_ARK_VIDEO_BASE_URL, isVolcArkVideoPlatform } from "@/lib/volc-ark-video";
+import {
+  VOLC_ARK_SEEDANCE_MODEL_ID,
+  VOLC_ARK_VIDEO_BASE_URL,
+  VOLC_ARK_VIDEO_MODEL_OPTIONS,
+  isVolcArkVideoPlatform,
+  normalizeVolcArkVideoModelList,
+} from "@/lib/volc-ark-video";
 
 interface EditProviderDialogProps {
   open: boolean;
@@ -47,11 +60,13 @@ export function EditProviderDialog({
   // Initialize form when provider changes
   useEffect(() => {
     if (provider) {
+      const isOfficialVolcArk = isVolcArkVideoPlatform(provider.platform);
       setName(provider.name);
       setBaseUrl(provider.baseUrl);
       setApiKey(provider.apiKey);
-      // 加载已有模型
-      setModel(provider.model?.join(', ') || '');
+      setModel(isOfficialVolcArk
+        ? normalizeVolcArkVideoModelList(provider.model)[0]
+        : provider.model?.join(', ') || '');
     }
   }, [provider]);
 
@@ -65,11 +80,12 @@ export function EditProviderDialog({
       return;
     }
 
-    // 解析模型列表（支持逗号或换行分隔）
-    const models = model
-      .split(/[,\n]/)
-      .map(m => m.trim())
-      .filter(m => m.length > 0);
+    const models = isOfficialVolcArk
+      ? [model || VOLC_ARK_SEEDANCE_MODEL_ID]
+      : model
+        .split(/[,\n]/)
+        .map(m => m.trim())
+        .filter(m => m.length > 0);
 
     const nextProvider = normalizeBuiltInProvider({
       ...provider,
@@ -153,14 +169,39 @@ export function EditProviderDialog({
           {!hideModel && (
             <div className="space-y-2">
               <Label>模型</Label>
-              <Input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="输入模型名称，如 deepseek-v3"
-              />
-              <p className="text-xs text-muted-foreground">
-                多个模型用逗号分隔，第一个为默认模型
-              </p>
+              {isVolcArkVideoPlatform(provider?.platform) ? (
+                <>
+                  <Select value={model} onValueChange={setModel}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="选择火山方舟视频模型" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {VOLC_ARK_VIDEO_MODEL_OPTIONS.map((option) => (
+                        <SelectItem key={option.id} value={option.id}>
+                          <span className="flex flex-col text-left">
+                            <span>{option.label}</span>
+                            <span className="text-[11px] text-muted-foreground">{option.id}</span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    火山方舟视频模型使用同一组 API Key 鉴权，但账号必须已开通所选模型。
+                  </p>
+                </>
+              ) : (
+                <>
+                  <Input
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="输入模型名称，如 deepseek-v3"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    多个模型用逗号分隔，第一个为默认模型
+                  </p>
+                </>
+              )}
             </div>
           )}
         </div>

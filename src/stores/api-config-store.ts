@@ -1294,12 +1294,12 @@ export const useAPIConfigStore = create<APIConfigStore>()(
     {
       name: 'opencut-api-config',  // localStorage key
       storage: createJSONStorage(() => fileStorage),
-      version: 17,  // v17: move Volc Ark video preset from Seedance 2.0 to Seedance 1.0 I2V
+      version: 18,  // v18: use official Volc Ark Seedance 1.0 Pro preset and dropdown models
       migrate: (persistedState: unknown, version: number) => {
         // Use mutable result object for chained migration
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const result = { ...(persistedState as any) } as Partial<APIConfigState> & { imageHostConfig?: LegacyImageHostConfig };
-        console.log(`[APIConfig] Chained migration: v${version} → v17`);
+        console.log(`[APIConfig] Chained migration: v${version} → v18`);
 
         // Default feature bindings for migration
         const defaultBindings: FeatureBindings = {
@@ -1679,6 +1679,18 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           );
           result.providers = providersBeforeMigration.map((provider) => migrateVolcArkLegacyDefaultProvider(provider));
           version = 17;
+        }
+
+        // v17 → v18: v17 briefly used Seedance 1.0 Lite I2V as the app default.
+        // That model can return InvalidEndpointOrModel.NotFound for ordinary Ark keys.
+        if (version <= 17) {
+          const providersBeforeMigration: IProvider[] = result.providers || [];
+          result.featureBindings = migrateVolcArkLegacyDefaultBindings(
+            { ...defaultBindings, ...(result.featureBindings || {}) },
+            providersBeforeMigration,
+          );
+          result.providers = providersBeforeMigration.map((provider) => migrateVolcArkLegacyDefaultProvider(provider));
+          version = 18;
         }
 
         // ========== Final normalization (always runs) ==========

@@ -44,9 +44,11 @@ import {
 import {
   VOLC_ARK_SEEDANCE_DISPLAY_NAME,
   VOLC_ARK_SEEDANCE_MODEL_ID,
+  VOLC_ARK_VIDEO_MODEL_OPTIONS,
   VOLC_ARK_VIDEO_BASE_URL,
   VOLC_ARK_VIDEO_NAME,
   VOLC_ARK_VIDEO_PLATFORM,
+  isVolcArkVideoPlatform,
 } from "@/lib/volc-ark-video";
 
 /**
@@ -69,6 +71,7 @@ const PLATFORM_PRESETS: Array<{
   hideName?: boolean;
   hideModel?: boolean;
   modelLabel?: string;
+  modelOptions?: typeof VOLC_ARK_VIDEO_MODEL_OPTIONS;
 }> = [
   {
     platform: CHUNFENG_PLATFORM,
@@ -118,6 +121,7 @@ const PLATFORM_PRESETS: Array<{
     allowMultiple: true,
     hideBaseUrl: true,
     modelLabel: VOLC_ARK_SEEDANCE_DISPLAY_NAME,
+    modelOptions: VOLC_ARK_VIDEO_MODEL_OPTIONS,
   },
   {
     platform: "runninghub",
@@ -162,6 +166,7 @@ export function AddProviderDialog({
   const hideBaseUrl = !!selectedPreset?.hideBaseUrl;
   const hideName = !!selectedPreset?.hideName;
   const hideModel = !!selectedPreset?.hideModel;
+  const isOfficialVolcArk = isVolcArkVideoPlatform(platform);
 
   // Reset form when dialog opens
   useEffect(() => {
@@ -213,7 +218,11 @@ export function AddProviderDialog({
       .split(/[,\n]/)
       .map((item) => item.trim())
       .filter(Boolean);
-    const modelArray = hideModel ? presetModels : (typedModels.length > 0 ? typedModels : presetModels);
+    const modelArray = hideModel
+      ? presetModels
+      : isOfficialVolcArk
+        ? [model || presetModels[0] || VOLC_ARK_SEEDANCE_MODEL_ID]
+        : (typedModels.length > 0 ? typedModels : presetModels);
     
     onSubmit({
       platform,
@@ -309,11 +318,34 @@ export function AddProviderDialog({
           {!hideModel && (
             <div className="space-y-2">
               <Label>{selectedPreset?.modelLabel ? `模型（${selectedPreset.modelLabel}）` : "模型 (可选)"}</Label>
-              <Input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder={selectedPreset?.modelLabel ? "输入火山方舟模型 ID 或推理接入点名称" : "输入模型名称，如 gpt-4o"}
-              />
+              {isOfficialVolcArk && selectedPreset?.modelOptions ? (
+                <Select value={model} onValueChange={setModel}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择火山方舟视频模型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {selectedPreset.modelOptions.map((option) => (
+                      <SelectItem key={option.id} value={option.id}>
+                        <span className="flex flex-col text-left">
+                          <span>{option.label}</span>
+                          <span className="text-[11px] text-muted-foreground">{option.id}</span>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="输入模型名称，如 gpt-4o"
+                />
+              )}
+              {isOfficialVolcArk && selectedPreset?.modelOptions && (
+                <p className="text-xs text-muted-foreground">
+                  火山方舟视频模型使用同一组 API Key 鉴权，但账号必须已开通所选模型。
+                </p>
+              )}
             </div>
           )}
         </div>
