@@ -7,7 +7,15 @@ contract:
 https://px.ks.santisaas.com/?phone=1598220xxxx
 ```
 
-State data is stored in PostgreSQL under keys like:
+When `CLOUD_STORAGE_DRIVER=local` (the Docker Compose default), state data is
+stored in the project directory under:
+
+```text
+./data/cloud-storage
+```
+
+When `CLOUD_STORAGE_DRIVER=postgres`, state data is stored in PostgreSQL under
+keys like:
 
 ```text
 users/{phone}/santi-project-store
@@ -15,10 +23,25 @@ users/{phone}/_p/{projectId}/director
 users/{phone}/opencut-api-config
 ```
 
-Generated and uploaded media is stored in Aliyun OSS under:
+Generated and uploaded media is stored separately from the project JSON. With
+the Docker Compose default `CLOUD_MEDIA_DRIVER=local`, media bytes are stored in
+the project directory under:
+
+```text
+./data/cloud-media
+```
+
+If `CLOUD_MEDIA_DRIVER=oss` is configured, generated and uploaded media is stored
+in Aliyun OSS under:
 
 ```text
 mj/users/{phone}/...
+```
+
+Generation task snapshots are stored under:
+
+```text
+./data/generation-tasks
 ```
 
 ## Local Development
@@ -56,4 +79,13 @@ The compose file starts both services:
 - `postgres`: local PostgreSQL database with a persistent Docker volume.
 - `moyin-creator`: web app on port `8088`.
 
-Keep OSS keys and database passwords in `.env`. Do not commit `.env`.
+The app service bind-mounts these project-local directories so rebuilds and
+container recreation do not delete generated media:
+
+```text
+./data/cloud-storage
+./data/cloud-media
+./data/generation-tasks
+```
+
+Keep OSS keys and database passwords in `.env`. Do not commit `.env` or `data/`.

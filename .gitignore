@@ -15,6 +15,7 @@ dist-electron
 
 # Build outputs
 .cache/
+data/
 out/
 release/
 

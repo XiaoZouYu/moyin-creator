@@ -12,6 +12,8 @@ dist-electron
 out
 release
 coverage
+data
+.cache
 
 *.log
 npm-debug.log*

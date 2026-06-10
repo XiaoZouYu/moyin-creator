@@ -35,10 +35,10 @@ services:
       HOST: 0.0.0.0
       PORT: 8088
       CLOUD_STORAGE_DRIVER: ${CLOUD_STORAGE_DRIVER:-local}
-      CLOUD_STORAGE_DIR: ${CLOUD_STORAGE_DIR:-/app/.cache/cloud-storage}
+      CLOUD_STORAGE_DIR: ${CLOUD_STORAGE_DIR:-/app/data/cloud-storage}
       CLOUD_MEDIA_DRIVER: ${CLOUD_MEDIA_DRIVER:-local}
-      CLOUD_MEDIA_DIR: ${CLOUD_MEDIA_DIR:-/app/.cache/cloud-media}
-      GENERATION_TASK_STORE_DIR: ${GENERATION_TASK_STORE_DIR:-/app/.cache/generation-tasks}
+      CLOUD_MEDIA_DIR: ${CLOUD_MEDIA_DIR:-/app/data/cloud-media}
+      GENERATION_TASK_STORE_DIR: ${GENERATION_TASK_STORE_DIR:-/app/data/generation-tasks}
       MAX_PROXY_BODY_BYTES: 52428800
       MAX_CLOUD_BODY_BYTES: ${MAX_CLOUD_BODY_BYTES:-209715200}
       DATABASE_URL: postgresql://${POSTGRES_USER:-moyin}:${POSTGRES_PASSWORD:-moyin_local_password}@postgres:5432/${POSTGRES_DB:-moyin_creator}
@@ -51,6 +51,10 @@ services:
       ALI_OSS_SIGNED_URL_EXPIRES: ${ALI_OSS_SIGNED_URL_EXPIRES:-86400}
     ports:
       - "8088:8088"
+    volumes:
+      - ./data/cloud-storage:/app/data/cloud-storage
+      - ./data/cloud-media:/app/data/cloud-media
+      - ./data/generation-tasks:/app/data/generation-tasks
 
 volumes:
   moyin-postgres-data:
