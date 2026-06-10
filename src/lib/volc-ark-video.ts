@@ -5,12 +5,42 @@
 export const VOLC_ARK_VIDEO_PLATFORM = "volc_ark_video";
 export const VOLC_ARK_VIDEO_NAME = "火山方舟视频生成";
 export const VOLC_ARK_VIDEO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
-export const VOLC_ARK_SEEDANCE_MODEL_ID = "doubao-seedance-2-0-260128";
-export const VOLC_ARK_SEEDANCE_FALLBACK_MODEL_ID = "doubao-seedance-2-0-pro";
-export const VOLC_ARK_SEEDANCE_DISPLAY_NAME = "Seedance 2.0";
+export const VOLC_ARK_SEEDANCE_1_0_LITE_I2V_MODEL_ID = "doubao-seedance-1-0-lite-i2v-250428";
+export const VOLC_ARK_SEEDANCE_1_0_LITE_T2V_MODEL_ID = "doubao-seedance-1-0-lite-t2v-250428";
+export const VOLC_ARK_SEEDANCE_1_0_PRO_MODEL_ID = "doubao-seedance-1-0-pro-250528";
+export const VOLC_ARK_SEEDANCE_1_0_PRO_FAST_MODEL_ID = "doubao-seedance-1-0-pro-fast-251015";
+export const VOLC_ARK_SEEDANCE_1_5_PRO_MODEL_ID = "doubao-seedance-1-5-pro-251215";
+export const VOLC_ARK_SEEDANCE_2_0_MODEL_ID = "doubao-seedance-2-0-260128";
+export const VOLC_ARK_SEEDANCE_2_0_PRO_MODEL_ID = "doubao-seedance-2-0-pro";
+export const VOLC_ARK_SEEDANCE_MODEL_ID = VOLC_ARK_SEEDANCE_1_0_LITE_I2V_MODEL_ID;
+export const VOLC_ARK_SEEDANCE_FALLBACK_MODEL_ID = VOLC_ARK_SEEDANCE_1_0_LITE_T2V_MODEL_ID;
+export const VOLC_ARK_SEEDANCE_DISPLAY_NAME = "Seedance 1.0 Lite I2V";
+export const VOLC_ARK_LEGACY_DEFAULT_MODEL_IDS = [
+  VOLC_ARK_SEEDANCE_2_0_MODEL_ID,
+  VOLC_ARK_SEEDANCE_2_0_PRO_MODEL_ID,
+] as const;
+export const VOLC_ARK_SEEDANCE_KNOWN_MODEL_IDS = [
+  VOLC_ARK_SEEDANCE_1_0_LITE_I2V_MODEL_ID,
+  VOLC_ARK_SEEDANCE_1_0_LITE_T2V_MODEL_ID,
+  VOLC_ARK_SEEDANCE_1_0_PRO_MODEL_ID,
+  VOLC_ARK_SEEDANCE_1_0_PRO_FAST_MODEL_ID,
+  VOLC_ARK_SEEDANCE_1_5_PRO_MODEL_ID,
+  VOLC_ARK_SEEDANCE_2_0_MODEL_ID,
+  VOLC_ARK_SEEDANCE_2_0_PRO_MODEL_ID,
+] as const;
 
 export function isVolcArkVideoPlatform(platform?: string | null): boolean {
   return platform === VOLC_ARK_VIDEO_PLATFORM;
+}
+
+export function normalizeVolcArkVideoModelList(models?: readonly string[] | null): string[] {
+  const normalized = Array.from(new Set((models || []).map((model) => model.trim()).filter(Boolean)));
+  return normalized.length > 0 ? normalized : [VOLC_ARK_SEEDANCE_MODEL_ID];
+}
+
+export function isLegacyVolcArkDefaultModel(model?: string | null): boolean {
+  if (!model) return false;
+  return (VOLC_ARK_LEGACY_DEFAULT_MODEL_IDS as readonly string[]).includes(model.trim());
 }
 
 function normalizeBaseUrl(baseUrl: string): string {

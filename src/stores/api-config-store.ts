@@ -37,7 +37,9 @@ import {
 import { corsFetch } from '@/lib/cors-fetch';
 import {
   VOLC_ARK_SEEDANCE_MODEL_ID,
+  isLegacyVolcArkDefaultModel,
   VOLC_ARK_VIDEO_BASE_URL,
+  normalizeVolcArkVideoModelList,
   isVolcArkVideoPlatform,
 } from '@/lib/volc-ark-video';
 import { fileStorage } from '@/lib/indexed-db-storage';
@@ -576,7 +578,7 @@ function normalizeKnownProvider<T extends Omit<IProvider, 'id'> | IProvider>(pro
     } as T;
   }
   if (!isVolcArkVideoPlatform(builtInProvider.platform)) return builtInProvider;
-  const models = builtInProvider.model?.length ? builtInProvider.model : [VOLC_ARK_SEEDANCE_MODEL_ID];
+  const models = normalizeVolcArkVideoModelList(builtInProvider.model);
   return {
     ...builtInProvider,
     name: builtInProvider.name?.trim() || '火山方舟视频生成',
@@ -609,6 +611,37 @@ function buildKnownProviderMetadata(provider: Pick<IProvider, 'platform' | 'mode
     return buildAgnesModelMetadata(provider.model?.length ? provider.model : AGNES_DEFAULT_MODELS);
   }
   return null;
+}
+
+function migrateVolcArkLegacyDefaultProvider(provider: IProvider): IProvider {
+  if (!isVolcArkVideoPlatform(provider.platform)) return provider;
+  const models = normalizeVolcArkVideoModelList(provider.model);
+  if (models.length !== 1 || !isLegacyVolcArkDefaultModel(models[0])) {
+    return { ...provider, model: models };
+  }
+  return { ...provider, model: [VOLC_ARK_SEEDANCE_MODEL_ID] };
+}
+
+function migrateVolcArkLegacyDefaultBindings(bindings: FeatureBindings, providers: IProvider[]): FeatureBindings {
+  const modelReplacements = new Map<string, string>();
+  for (const provider of providers) {
+    if (!isVolcArkVideoPlatform(provider.platform)) continue;
+    for (const model of provider.model || []) {
+      if (!isLegacyVolcArkDefaultModel(model)) continue;
+      modelReplacements.set(`${provider.id}:${model}`, `${provider.id}:${VOLC_ARK_SEEDANCE_MODEL_ID}`);
+      modelReplacements.set(`${provider.platform}:${model}`, `${provider.platform}:${VOLC_ARK_SEEDANCE_MODEL_ID}`);
+    }
+  }
+  if (modelReplacements.size === 0) return bindings;
+
+  const migrated: FeatureBindings = { ...bindings };
+  for (const feature of AI_FEATURES) {
+    const value = bindings[feature.key];
+    if (!Array.isArray(value)) continue;
+    const next = Array.from(new Set(value.map((binding) => modelReplacements.get(binding) || binding)));
+    migrated[feature.key] = next.length > 0 ? next : null;
+  }
+  return migrated;
 }
 
 const initialState: APIConfigState = {
@@ -1261,12 +1294,12 @@ export const useAPIConfigStore = create<APIConfigStore>()(
     {
       name: 'opencut-api-config',  // localStorage key
       storage: createJSONStorage(() => fileStorage),
-      version: 16,  // v16: split built-in aggregator into auto-vip and add Chunfeng provider
+      version: 17,  // v17: move Volc Ark video preset from Seedance 2.0 to Seedance 1.0 I2V
       migrate: (persistedState: unknown, version: number) => {
         // Use mutable result object for chained migration
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const result = { ...(persistedState as any) } as Partial<APIConfigState> & { imageHostConfig?: LegacyImageHostConfig };
-        console.log(`[APIConfig] Chained migration: v${version} → v16`);
+        console.log(`[APIConfig] Chained migration: v${version} → v17`);
 
         // Default feature bindings for migration
         const defaultBindings: FeatureBindings = {
@@ -1634,6 +1667,18 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           }
 
           version = 16;
+        }
+
+        // v16 → v17: The official Volc Ark video preset used Seedance 2.0 as an app default.
+        // Keys do not expose a model version, so old untouched defaults must be migrated explicitly.
+        if (version <= 16) {
+          const providersBeforeMigration: IProvider[] = result.providers || [];
+          result.featureBindings = migrateVolcArkLegacyDefaultBindings(
+            { ...defaultBindings, ...(result.featureBindings || {}) },
+            providersBeforeMigration,
+          );
+          result.providers = providersBeforeMigration.map((provider) => migrateVolcArkLegacyDefaultProvider(provider));
+          version = 17;
         }
 
         // ========== Final normalization (always runs) ==========

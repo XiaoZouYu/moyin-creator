@@ -10,7 +10,7 @@
  * 二级：模型列表（checkbox 多选）
  */
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useAPIConfigStore, type AIFeature } from "@/stores/api-config-store";
 import { parseApiKeys, classifyModelByName, type ModelCapability } from "@/lib/api-key-manager";
 import { Label } from "@/components/ui/label";
@@ -44,8 +44,7 @@ import {
 } from "@/lib/ai/provider-platforms";
 import { getModelDisplayName } from "@/lib/freedom/model-display-names";
 import {
-  VOLC_ARK_SEEDANCE_FALLBACK_MODEL_ID,
-  VOLC_ARK_SEEDANCE_MODEL_ID,
+  VOLC_ARK_SEEDANCE_KNOWN_MODEL_IDS,
   VOLC_ARK_VIDEO_PLATFORM,
 } from "@/lib/volc-ark-video";
 
@@ -176,8 +175,7 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'gemini-veo': ['video_generation'],
   'doubao-seedance-1-5-pro': ['video_generation'],
   'doubao-seedance-1-5-pro-251215': ['video_generation'],
-  [VOLC_ARK_SEEDANCE_MODEL_ID]: ['video_generation'],
-  [VOLC_ARK_SEEDANCE_FALLBACK_MODEL_ID]: ['video_generation'],
+  ...Object.fromEntries(VOLC_ARK_SEEDANCE_KNOWN_MODEL_IDS.map((model) => [model, ['video_generation'] as ModelCapability[]])),
   'doubao-seedream-4-5-251128': ['image_generation'],
   'veo3.1': ['video_generation'],
   'sora-2-all': ['video_generation'],
@@ -304,9 +302,9 @@ export function FeatureBindingPanel() {
     return set;
   }, [providers]);
 
-  const isProviderConfigured = (providerIdOrPlatform: string): boolean => {
+  const isProviderConfigured = useCallback((providerIdOrPlatform: string): boolean => {
     return configuredProviderIds.has(providerIdOrPlatform);
-  };
+  }, [configuredProviderIds]);
 
   const optionsByFeature = useMemo(() => {
     const map: Partial<Record<AIFeature, ProviderOption[]>> = {};
@@ -349,7 +347,7 @@ export function FeatureBindingPanel() {
     }
 
     return map;
-  }, [providers, configuredProviderIds, modelTypes, modelTags]);
+  }, [providers, isProviderConfigured, modelTypes, modelTags]);
 
   // 计算已配置的功能数（至少有一个有效绑定）
   const configuredCount = useMemo(() => {
@@ -366,7 +364,7 @@ export function FeatureBindingPanel() {
         return existsInOptions && isProviderConfigured(parsed.providerIdOrPlatform);
       });
     }).length;
-  }, [optionsByFeature, configuredProviderIds, getFeatureBindings]);
+  }, [optionsByFeature, isProviderConfigured, getFeatureBindings]);
 
   // 切换单个模型的选中状态
   const handleToggleBinding = (feature: FeatureMeta, optionKey: string) => {
